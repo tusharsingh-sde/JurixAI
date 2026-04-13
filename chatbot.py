@@ -11,16 +11,16 @@ os.environ["GROQ_API_KEY"] = os.getenv("GROQ_API_KEY")
 # 2. Database and Embeddings loading 
 print("📚 Loading Law Books...")
 embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
-db = Chroma(persist_directory="./lexai_db", embedding_function=embeddings)
+db = Chroma(persist_directory="./Jurixai_db", embedding_function=embeddings)
 
 # 3. Groq (Llama 3) calling
-print("🚀 Waking up Super-Fast AI Lawyer (LexAI)...")
+print("🚀 Waking up Super-Fast AI Lawyer (JurixAI)...")
 llm = ChatGroq(model_name="llama-3.3-70b-versatile")
 
 # 4. Question (Query)
 # (For your demo, you can later change this to input("Enter your legal query: "))
 query = "the shopkeeper denied to take return of the product and refused to give a refund. What can I do? I have the bill and the product is defective"
-print(f"\n👤 User Sawaal: {query}\n")
+print(f"\n👤 User Query: {query}\n")
 
 # 5. Extract 8 relevant chunks from Database
 print("🔍 Searching deep into legal records...")
@@ -29,7 +29,7 @@ context_text = "\n\n".join([doc.page_content for doc in results])
 
 # 6. Advanced Lawyer Prompt (UX Optimized + Elite Lawyer Vibe)
 prompt = f"""
-You are LexAI, an elite, highly authoritative, and intensely practical Indian Legal Assistant.
+You are JurixAI, an elite, highly authoritative, and intensely practical Indian Legal Assistant.
 
 Your job is to ARM the user with legal power, but you MUST start by being their friend—showing genuine empathy and support before switching to "lawyer mode".
 
@@ -64,7 +64,7 @@ Your job is to ARM the user with legal power, but you MUST start by being their 
 
 ━━━━━━━━━━━━━━━━━━━━━━━
 🚫 STRICT RULES & LEX-AI USP:
-- THE LEX-AI USP (100% RELIABILITY): Stay strictly within the limits of Indian Law. Provide the most effective paths based strictly on the provided context data. Do not invent non-existent portals or helplines.
+- THE JURIX-AI USP (100% RELIABILITY): Stay strictly within the limits of Indian Law. Provide the most effective paths based strictly on the provided context data. Do not invent non-existent portals or helplines.
 - INVISIBLE STRUCTURE (CRITICAL): Do NOT print the internal section headings like "Empathy & Support:", "The #1 Ultimate Action:", etc. Weave the content naturally using paragraphs and bullet points so it feels like a real conversation.
 - Do NOT merge Step 2 and Step 3. Keep them visually separated for the user's eyes.
 ━━━━━━━━━━━━━━━━━━━━━━━
@@ -83,9 +83,9 @@ try:
     print("⏳ The Lawyer is drafting the response...\n")
     response = llm.invoke(prompt)
     print("="*60)
-    print("⚖️ LEX-AI PROFESSIONAL LEGAL ADVICE ⚖️")
+    print("⚖️ JURIX-AI PROFESSIONAL LEGAL ADVICE ⚖️")
     print("="*60)
     print(response.content)
     print("="*60)
 except Exception as e:
-    print(f"Bhai, limit hit ho gayi ya koi error hai: {e}")
+    print(f"ERROR: Limit has been reached {e}")

@@ -1,14 +1,14 @@
 from langchain_community.vectorstores import Chroma
 from langchain_huggingface import HuggingFaceEmbeddings
 
-# 1. Wahi same model wapas load karo (taaki AI ko bhasha samajh aaye)
+# 1. Load same model (ao that Ai can understand the language of the chunks and the query)
 embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
 
-# 2. Apna banaya hua database connect karo
-print("Connecting to LexAI Database...\n")
-db = Chroma(persist_directory="./lexai_db", embedding_function=embeddings)
+# 2. Connect to the same ChromaDB where we have saved all the chunks (Legal knowledge)
+print("Connecting to JurixAI Database...\n")
+db = Chroma(persist_directory="./Jurixai_db", embedding_function=embeddings)
 
-# 3. Apna Sawaal (Query) likho - Tu isko change karke kuch bhi puch sakta hai
+# 3. Write your question (Query) here (For your demo, you can later change this to input("Enter your legal query: "))
 query = "What is the punishment for online fraud or cyber crime?" 
 print(f"User Query: {query}\n")
 

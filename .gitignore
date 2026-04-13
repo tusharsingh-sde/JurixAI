@@ -1,4 +1,4 @@
 .env
 __pycache__/
-lexai_db/
+Jurixai_db/
 .venv/

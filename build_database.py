@@ -21,5 +21,5 @@ embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
 
 # 4. Save to ChromaDB permanently
 print("Creating Vector Database... (Isme thoda time lag sakta hai)")
-db = Chroma.from_documents(chunks, embeddings, persist_directory="./lexai_db")
-py
+db = Chroma.from_documents(chunks, embeddings, persist_directory="./Jurixai_db")
+print("Vector Database created successfully!")
