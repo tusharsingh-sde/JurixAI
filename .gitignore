@@ -1,0 +1,4 @@
+.env
+__pycache__/
+lexai_db/
+.venv/
