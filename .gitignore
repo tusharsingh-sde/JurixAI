@@ -1,4 +1,16 @@
+
+# Environment & Secrets
 .env
+**/.env
+**/.env.*
+!**/.env.example
+
+# Backend
+.venv/
 __pycache__/
 Jurixai_db/
-.venv/
+backend.zip
+
+# Frontend
+frontend/node_modules/
+frontend/dist/
