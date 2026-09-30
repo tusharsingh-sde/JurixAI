@@ -1,16 +1,111 @@
-
+# ============================
 # Environment & Secrets
+# ============================
 .env
 **/.env
 **/.env.*
 !**/.env.example
 
-# Backend
+# ============================
+# Python / Backend
+# ============================
+
+# Virtual environments
 .venv/
+venv/
+env/
+ENV/
+
+# Byte-compiled / optimized / DLL files
 __pycache__/
+**/__pycache__/
+*.py[cod]
+*$py.class
+
+# Distribution / packaging
+*.egg
+*.egg-info/
+dist/
+build/
+*.whl
+
+# Installer logs
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Unit test / coverage
+htmlcov/
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache
+*.cover
+*.py,cover
+.pytest_cache/
+
+# mypy / type-checkers
+.mypy_cache/
+.pytype/
+.pyre/
+
+# ChromaDB / Vector store data
 Jurixai_db/
+
+# Large archive artifacts
 backend.zip
 
-# Frontend
+# ============================
+# Node.js / Frontend
+# ============================
+node_modules/
 frontend/node_modules/
 frontend/dist/
+frontend/dist-ssr/
+*.local
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# ============================
+# IDE & Editors
+# ============================
+.vscode/*
+!.vscode/settings.json
+!.vscode/extensions.json
+.idea/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+*.sublime-workspace
+*.sublime-project
+*.code-workspace
+
+# ============================
+# OS Files
+# ============================
+.DS_Store
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+*.lnk
+
+# ============================
+# Misc
+# ============================
+*.bak
+*.tmp
+*.temp
+*.swp
+*.swo
+*~
+context.txt
