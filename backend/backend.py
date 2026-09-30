@@ -1,101 +1,343 @@
 import os
+import uuid
+from typing import Optional
 from dotenv import load_dotenv
-from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi import FastAPI, UploadFile, File, HTTPException, Depends
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from langchain_community.vectorstores import Chroma
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_google_genai import ChatGoogleGenerativeAI
+from supabase import create_client, Client
 import pdfplumber
 from PIL import Image
 import pytesseract
 import io
 
-# 1. Environment Setup (Load Variables first))
+#environment setup
 load_dotenv()
 os.environ["GOOGLE_API_KEY"] = os.getenv("GEMINI_API_KEY")
 
-# 2. Tesseract path
+#tesseract path
 pytesseract.pytesseract.tesseract_cmd = r'C:\Users\tstus\AppData\Local\Programs\Tesseract-OCR\tesseract.exe'
 
-# 3. App Initialization 
+#supabase client
+supabase_url = os.getenv("SUPABASE_URL")
+supabase_key = os.getenv("SUPABASE_SECRET_KEY") or os.getenv("SUPABASE_SERVICE_KEY")
+
+if not supabase_url or not supabase_key:
+    raise RuntimeError(
+        "❌ Missing Supabase credentials! Please set SUPABASE_URL and SUPABASE_SECRET_KEY (or SUPABASE_SERVICE_KEY) in backend/.env"
+    )
+
+supabase: Client = create_client(supabase_url, supabase_key)
+
+#FastAPI Initialization
 app = FastAPI(title="JurixAI Backend", description="Elite Legal RAG Engine")
 
-# 4. CORS Middleware Setup 
+
+#CORS Middleware
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"], 
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# 5. Database & AI Loading (The Brain)
-print("Loading JurixAI Brain...")
+
+#AI Brain Loading
+
+print("Loading JurixAI")
 embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
 db = Chroma(persist_directory="./Jurixai_db", embedding_function=embeddings)
-llm = ChatGoogleGenerativeAI(model="gemini-3.6-flash")
+def invoke_gemini(prompt: str) -> str:
+    """Invokes Gemini with automatic model fallback to prevent 503 high demand errors."""
+    models = ["gemini-3.5-flash", "gemini-3.5-flash-lite", "gemini-3.7-flash"]
+    last_err = None
+    for model_name in models:
+        try:
+            model = ChatGoogleGenerativeAI(model=model_name, max_retries=2)
+            res = model.invoke(prompt)
+            if isinstance(res.content, list):
+                return "".join(p.get("text", "") if isinstance(p, dict) else str(p) for p in res.content)
+            return str(res.content)
+        except Exception as e:
+            print(f"Model {model_name} failed: {e}. Trying fallback model...")
+    if last_err:
+        raise last_err
+    raise RuntimeError("All Gemini models failed to respond.")
 
-# 6. Temporary Memory Store
-chat_memory = {}
 
-# 7. Data Rules
+#Data Models
 class UserRequest(BaseModel):
-    session_id: str
     message: str
+    session_id: Optional[str] = None
+
+class AuthRequest(BaseModel):
+    email: str
+    password: str
+
+class NewSessionRequest(BaseModel):
+    title: Optional[str] = "New Conversation"
 
 
-# API ENDPOINTS
+#Auth Helper — JWT verification via HTTPBearer
+security = HTTPBearer()
 
-# Endpoint 1: File Upload & Scanning
+def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)):
+    """Extract and verify user from Bearer token sent by the frontend."""
+    token = credentials.credentials
+    try:
+        user_response = supabase.auth.get_user(token)
+        if not user_response.user:
+            raise HTTPException(status_code=401, detail="Invalid or expired token")
+        return user_response.user
+    except Exception:
+        raise HTTPException(status_code=401, detail="Invalid or expired token. Please log in again.")
+
+#History Helper — rolling summary for long conversations
+MAX_VERBATIM = 10       # Last N messages sent as-is
+SUMMARY_THRESHOLD = 20  # Summarize when total messages exceed this
+
+def get_history_for_prompt(session_id: str) -> str:
+    """
+    Fetch messages from Supabase.
+    For long conversations, old messages are summarized to save tokens.
+    """
+    all_msgs = supabase.table("messages") \
+        .select("role, content") \
+        .eq("session_id", session_id) \
+        .order("created_at", desc=False) \
+        .execute().data
+
+    if not all_msgs:
+        return "No previous conversation."
+
+    if len(all_msgs) <= MAX_VERBATIM:
+        return "\n".join(f"{m['role']}: {m['content']}" for m in all_msgs)
+
+    # Rolling summary: compress old messages, keep recent ones verbatim
+    old_msgs = all_msgs[:-MAX_VERBATIM]
+    recent_msgs = all_msgs[-MAX_VERBATIM:]
+
+    old_text = "\n".join(f"{m['role']}: {m['content']}" for m in old_msgs)
+    summary_prompt = f"""Summarize this legal conversation in 3-4 sentences.
+Preserve: the user's legal situation, key laws or sections mentioned, and any advice given.
+
+{old_text}"""
+    summary = invoke_gemini(summary_prompt)
+
+    recent_text = "\n".join(f"{m['role']}: {m['content']}" for m in recent_msgs)
+    return f"[EARLIER SUMMARY]:\n{summary}\n\n[RECENT MESSAGES]:\n{recent_text}"
+
+
+# API & AUTH ENDPOINTS
+
+@app.post("/signup")
+async def signup(request: AuthRequest):
+    """Create a new JurixAI user account (automatically confirmed)."""
+    try:
+        response = supabase.auth.admin.create_user({
+            "email": request.email,
+            "password": request.password,
+            "email_confirm": True
+        })
+        if response.user:
+            return {
+                "status": "success",
+                "message": "Account created successfully! You can now log in immediately.",
+                "user_id": str(response.user.id)
+            }
+        raise HTTPException(status_code=400, detail="Signup failed. Please try again.")
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.post("/login")
+async def login(request: AuthRequest):
+    """Log in and receive an access token for authenticated requests."""
+    try:
+        response = supabase.auth.sign_in_with_password({
+            "email": request.email,
+            "password": request.password
+        })
+        if response.session:
+            return {
+                "status": "success",
+                "access_token": response.session.access_token,
+                "refresh_token": response.session.refresh_token,
+                "user_id": str(response.user.id),
+                "email": response.user.email
+            }
+        raise HTTPException(status_code=401, detail="Invalid email or password.")
+    except Exception as e:
+        raise HTTPException(status_code=401, detail=str(e))
+
+
+@app.post("/logout")
+async def logout(user=Depends(get_current_user)):
+    """Log out the current user."""
+    supabase.auth.sign_out()
+    return {"status": "success", "message": "Logged out successfully."}
+
+#SESSION ENDPOINTS
+@app.post("/sessions")
+async def create_session(request: NewSessionRequest, user=Depends(get_current_user)):
+    """Create a new chat session for the authenticated user."""
+    try:
+        response = supabase.table("sessions").insert({
+            "user_id": str(user.id),
+            "title": request.title
+        }).execute()
+        return {"status": "success", "session": response.data[0]}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/sessions")
+async def list_sessions(user=Depends(get_current_user)):
+    """List all sessions for the authenticated user, newest first."""
+    try:
+        response = supabase.table("sessions") \
+            .select("*") \
+            .eq("user_id", str(user.id)) \
+            .order("updated_at", desc=True) \
+            .execute()
+        return {"sessions": response.data}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/sessions/{session_id}/messages")
+async def get_session_messages(session_id: str, user=Depends(get_current_user)):
+    """Fetch all messages for a specific session (must be owned by the user)."""
+    try:
+        # Verify the user owns this session
+        session = supabase.table("sessions") \
+            .select("id") \
+            .eq("id", session_id) \
+            .eq("user_id", str(user.id)) \
+            .execute()
+        if not session.data:
+            raise HTTPException(status_code=404, detail="Session not found.")
+
+        messages = supabase.table("messages") \
+            .select("id, role, content, created_at") \
+            .eq("session_id", session_id) \
+            .order("created_at", desc=False) \
+            .execute()
+        return {"session_id": session_id, "messages": messages.data}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.delete("/sessions/{session_id}")
+async def delete_session(session_id: str, user=Depends(get_current_user)):
+    """Delete a session and all its messages (cascade handled by DB)."""
+    try:
+        supabase.table("sessions") \
+            .delete() \
+            .eq("id", session_id) \
+            .eq("user_id", str(user.id)) \
+            .execute()
+        return {"status": "success", "message": "Session deleted."}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+#DOCUMENT UPLOAD ENDPOINT
+
 @app.post("/upload")
-async def process_document(file: UploadFile = File(...)):
+async def process_document(file: UploadFile = File(...), user=Depends(get_current_user)):
+    """Upload a PDF or image document and extract its text content."""
     try:
         content = await file.read()
         extracted_text = ""
 
-        # Logic 1: Handle PDF Files
         if file.filename.lower().endswith(".pdf"):
             with pdfplumber.open(io.BytesIO(content)) as pdf:
                 for page in pdf.pages:
-                    extracted_text += page.extract_text() + "\n"
+                    page_text = page.extract_text()
+                    if page_text:
+                        extracted_text += page_text + "\n"
 
-        # Logic 2: Handle Images (JPG, PNG)
         elif file.filename.lower().endswith((".png", ".jpg", ".jpeg")):
             image = Image.open(io.BytesIO(content))
             extracted_text = pytesseract.image_to_string(image)
 
         else:
-            raise HTTPException(status_code=400, detail="Sir, only PDF and image files (JPG/PNG/JPEG) are allowed.")
+            raise HTTPException(status_code=400, detail="Only PDF and image files (JPG/PNG/JPEG) are allowed.")
 
-        # Clean the text
         cleaned_text = " ".join(extracted_text.split())
-
         return {
             "status": "success",
             "filename": file.filename,
             "extracted_text": cleaned_text
         }
-
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"File process karne mein error aa gaya: {str(e)}")
 
-# Endpoint 2: The Main Chat AI
+
+#MAIN CHAT ENDPOINT
+
 @app.post("/chat")
-async def chat_with_jurix(request: UserRequest):
+async def chat_with_jurix(request: UserRequest, user=Depends(get_current_user)):
+    """
+    Main chat endpoint. Requires an authenticated user and a valid session_id.
+    Saves all messages to Supabase with full history context.
+    """
     try:
         session_id = request.session_id
         user_msg = request.message
 
-        if session_id not in chat_memory:
-            chat_memory[session_id] = []
-        
-        history = chat_memory[session_id][-4:]
-        history_text = "\n".join([f"{msg['role']}: {msg['text']}" for msg in history])
+        # Check if session_id is a valid UUID
+        is_valid_uuid = False
+        if session_id and session_id != "string":
+            try:
+                uuid.UUID(str(session_id))
+                is_valid_uuid = True
+            except ValueError:
+                is_valid_uuid = False
 
+        session_data = None
+        if is_valid_uuid:
+            res = supabase.table("sessions") \
+                .select("id, title") \
+                .eq("id", session_id) \
+                .eq("user_id", str(user.id)) \
+                .execute()
+            if res.data:
+                session_data = res.data[0]
+
+        # If no valid existing session, auto-create one for this user
+        if not session_data:
+            short_title = user_msg[:50] + ("..." if len(user_msg) > 50 else "")
+            new_session = supabase.table("sessions").insert({
+                "user_id": str(user.id),
+                "title": short_title
+            }).execute()
+            session_id = new_session.data[0]["id"]
+        elif session_data.get("title") == "New Conversation":
+            short_title = user_msg[:50] + ("..." if len(user_msg) > 50 else "")
+            supabase.table("sessions") \
+                .update({"title": short_title}) \
+                .eq("id", session_id) \
+                .execute()
+
+        # Build conversation history context
+        history_text = get_history_for_prompt(session_id)
+
+        # RAG: fetch relevant legal knowledge from ChromaDB
         results = db.similarity_search(user_msg, k=5)
         context_text = "\n\n".join([doc.page_content for doc in results])
-
+        #promt to gemini
         prompt = f"""
 You are JurixAI — a calm, deeply knowledgeable, and compassionate Indian Legal Saathi.
 You are NOT a cold legal encyclopedia. You are the user's trusted friend who happens to know Indian Law inside out.
@@ -104,7 +346,7 @@ Your responses MUST be grounded in Indian Law (IPC/BNS, CrPC/BNSS, Constitution,
 ━━━━━━━━━━━━━━━━━━━━━━━
 🧘 CORE PRINCIPLE: CALM ANCHOR (ALWAYS ACTIVE)
 - NEVER use alarming or panic-inducing language. No matter how serious the situation is, your FIRST job is to make the user feel safe and heard.
-- NEVER say things like "This is very serious!", "You are in danger!", "Act immediately or else!". 
+- NEVER say things like "This is very serious!", "You are in danger!", "Act immediately or else!".
 - INSTEAD say things like "I completely understand your concern — let's sort this out step by step.", "You're doing the right thing by looking into this.", "Don't worry, you have strong legal options here."
 - Frame every situation as solvable. The user came to you stressed — they should leave feeling empowered.
 - Use warm, confident language: "Aapke paas clear legal protection hai" > "Ye bahut bada issue hai"
@@ -196,13 +438,22 @@ LEGAL KNOWLEDGE BASE:
 USER'S MESSAGE: {user_msg}
         """
 
-        response = llm.invoke(prompt)
+        reply = invoke_gemini(prompt)
 
-        chat_memory[session_id].append({"role": "User", "text": user_msg})
-        chat_memory[session_id].append({"role": "JurixAI", "text": response.content})
+        # Save both turns to Supabase (single batch insert)
+        supabase.table("messages").insert([
+            {"session_id": session_id, "role": "User",    "content": user_msg},
+            {"session_id": session_id, "role": "JurixAI", "content": reply}
+        ]).execute()
 
-        return {"reply": response.content}
+        return {
+            "session_id": session_id,
+            "reply": reply
+        }
 
+    except HTTPException:
+        raise
     except Exception as e:
         print(f"Chat error: {e}")
         raise HTTPException(status_code=500, detail=f"Chat processing error: {str(e)}")
+

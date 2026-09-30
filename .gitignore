@@ -1,14 +1,13 @@
-# ============================
-# Environment & Secrets
-# ============================
+
+# envs & Secrets
+
 .env
 **/.env
 **/.env.*
 !**/.env.example
 
-# ============================
-# Python / Backend
-# ============================
+
+# for Python / Backend
 
 # Virtual environments
 .venv/
@@ -55,9 +54,7 @@ Jurixai_db/
 # Large archive artifacts
 backend.zip
 
-# ============================
 # Node.js / Frontend
-# ============================
 node_modules/
 frontend/node_modules/
 frontend/dist/
@@ -73,9 +70,7 @@ yarn-error.log*
 pnpm-debug.log*
 lerna-debug.log*
 
-# ============================
 # IDE & Editors
-# ============================
 .vscode/*
 !.vscode/settings.json
 !.vscode/extensions.json
@@ -89,9 +84,9 @@ lerna-debug.log*
 *.sublime-project
 *.code-workspace
 
-# ============================
+
 # OS Files
-# ============================
+
 .DS_Store
 Thumbs.db
 ehthumbs.db
@@ -99,9 +94,7 @@ Desktop.ini
 $RECYCLE.BIN/
 *.lnk
 
-# ============================
 # Misc
-# ============================
 *.bak
 *.tmp
 *.temp
