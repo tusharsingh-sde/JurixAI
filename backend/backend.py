@@ -15,12 +15,31 @@ from PIL import Image
 import pytesseract
 import io
 
-#environment setup
+# Environment setup
 load_dotenv()
-os.environ["GOOGLE_API_KEY"] = os.getenv("GEMINI_API_KEY")
+gemini_api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+if gemini_api_key:
+    os.environ["GOOGLE_API_KEY"] = gemini_api_key
+else:
+    print("⚠️ Warning: Neither GEMINI_API_KEY nor GOOGLE_API_KEY is configured in backend/.env")
 
-#tesseract path
-pytesseract.pytesseract.tesseract_cmd = r'C:\Users\tstus\AppData\Local\Programs\Tesseract-OCR\tesseract.exe'
+# Tesseract OCR path configuration
+# 1. Custom path via TESSERACT_PATH environment variable
+# 2. Well-known Windows paths if they exist
+# 3. Default to system PATH (Linux / Docker / macOS / systems where tesseract is in PATH)
+custom_tesseract = os.getenv("TESSERACT_PATH")
+if custom_tesseract and os.path.exists(custom_tesseract):
+    pytesseract.pytesseract.tesseract_cmd = custom_tesseract
+elif os.name == "nt":
+    candidate_tesseract_paths = [
+        r'C:\Users\tstus\AppData\Local\Programs\Tesseract-OCR\tesseract.exe',
+        r'C:\Program Files\Tesseract-OCR\tesseract.exe',
+        r'C:\Program Files (x86)\Tesseract-OCR\tesseract.exe',
+    ]
+    for candidate_path in candidate_tesseract_paths:
+        if os.path.exists(candidate_path):
+            pytesseract.pytesseract.tesseract_cmd = candidate_path
+            break
 
 #supabase client
 supabase_url = os.getenv("SUPABASE_URL")

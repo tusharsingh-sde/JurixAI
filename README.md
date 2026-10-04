@@ -6,9 +6,10 @@
 
 [![Python](https://img.shields.io/badge/Python-3.10+-3776AB?style=for-the-badge&logo=python&logoColor=white)](https://python.org)
 [![React](https://img.shields.io/badge/React-19-61DAFB?style=for-the-badge&logo=react&logoColor=black)](https://react.dev)
-[![FastAPI](https://img.shields.io/badge/FastAPI-0.100+-009688?style=for-the-badge&logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com)
+[![FastAPI](https://img.shields.io/badge/FastAPI-0.115+-009688?style=for-the-badge&logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com)
 [![LangChain](https://img.shields.io/badge/LangChain-RAG-1C3C3C?style=for-the-badge&logo=langchain&logoColor=white)](https://langchain.com)
-[![Groq](https://img.shields.io/badge/Groq-Llama_3.3-F55036?style=for-the-badge&logo=groq&logoColor=white)](https://groq.com)
+[![Google Gemini](https://img.shields.io/badge/Google_Gemini-3.5_Flash-4285F4?style=for-the-badge&logo=google&logoColor=white)](https://ai.google.dev)
+[![Supabase](https://img.shields.io/badge/Supabase-Auth_%26_DB-3ECF8E?style=for-the-badge&logo=supabase&logoColor=white)](https://supabase.com)
 [![License](https://img.shields.io/badge/License-MIT-yellow?style=for-the-badge)](LICENSE)
 
 **JurixAI** is a high-performance, **RAG-based** (Retrieval-Augmented Generation) legal assistant purpose-built for the **Indian Legal System**. It goes beyond cold legal facts — acting as a *Legal Saathi* that understands your stress and provides authoritative, law-backed guidance with empathy.
@@ -47,8 +48,8 @@ Indian law is vast, complex, and deeply intimidating for the average citizen. Fr
 │                        Port 8000                                │
 │                                                                 │
 │  ┌──────────────┐   ┌──────────────┐   ┌─────────────────────┐  │
-│  │  /chat        │   │  /upload      │   │  Session Memory     │  │
-│  │  RAG Pipeline │   │  PDF + OCR    │   │  (In-Memory Store)  │  │
+│  │  /chat        │   │  /upload      │   │  Auth & Sessions    │  │
+│  │  RAG Pipeline │   │  PDF + OCR    │   │  (Supabase DB)      │  │
 │  └──────┬───────┘   └──────┬───────┘   └─────────────────────┘  │
 │         │                  │                                     │
 │         ▼                  ▼                                     │
@@ -61,10 +62,11 @@ Indian law is vast, complex, and deeply intimidating for the average citizen. Fr
 │  └──────────────────────────┬───────────────┘                   │
 │                             │                                    │
 │                             ▼                                    │
-│                   ┌──────────────────┐                           │
-│                   │   Groq Cloud API  │                           │
-│                   │  Llama-3.3-70B   │                           │
-│                   └──────────────────┘                           │
+│                   ┌──────────────────────────────┐              │
+│                   │      Google Gemini API       │              │
+│                   │  (gemini-3.5/3.7-flash with  │              │
+│                   │   automatic multi-fallback)  │              │
+│                   └──────────────────────────────┘              │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
@@ -75,8 +77,8 @@ Indian law is vast, complex, and deeply intimidating for the average citizen. Fr
 | 1 | **Data Ingestion** | 8 Indian Law PDFs are loaded and split into semantic chunks (1000 chars, 200 overlap) using `RecursiveCharacterTextSplitter` |
 | 2 | **Vectorization** | Chunks are embedded using HuggingFace `all-MiniLM-L6-v2` and stored in ChromaDB (`Jurixai_db`) |
 | 3 | **Retrieval** | User query triggers a top-5 similarity search against the vector store |
-| 4 | **Augmentation** | Retrieved legal context + conversation history (last 4 messages) are injected into a custom "Empathy-First" prompt |
-| 5 | **Generation** | Llama 3.3 70B (via Groq) generates a structured, law-backed, human-readable response |
+| 4 | **Augmentation** | Retrieved legal context + conversation history from Supabase are injected into a custom prompt |
+| 5 | **Generation** | Google Gemini (with multi-tier model fallback) generates a structured, law-backed, human-readable response |
 
 ---
 
@@ -90,8 +92,9 @@ Indian law is vast, complex, and deeply intimidating for the average citizen. Fr
 | **LangChain** | RAG pipeline orchestration |
 | **ChromaDB** | Persistent vector database for legal embeddings |
 | **HuggingFace Embeddings** | `all-MiniLM-L6-v2` for local, fast semantic search |
-| **Groq Cloud** | Lightning-fast LLM inference (Llama-3.3-70b-versatile) |
-| **pdfplumber** | PDF text extraction |
+| **Google Gemini** | LLM generation with automatic model fallback (`gemini-3.5-flash`, `gemini-3.7-flash`) |
+| **Supabase** | User authentication (JWT) and persistent message history |
+| **pdfplumber / pypdf** | PDF text extraction and document parsing |
 | **Tesseract OCR** | Image-to-text for scanned legal documents |
 | **Pydantic** | Request/response data validation |
 
@@ -100,7 +103,8 @@ Indian law is vast, complex, and deeply intimidating for the average citizen. Fr
 |-----------|---------|
 | **React 19** | Modern UI framework |
 | **Vite 8** | Next-gen build tool with HMR |
-| **ESLint** | Code quality enforcement |
+| **Lucide React** | Consistent iconography |
+| **Vanilla CSS** | Tailored theme, responsive layout & animations |
 
 ---
 
@@ -157,9 +161,10 @@ JurixAI_core/
 ### Prerequisites
 
 - **Python** 3.10 or higher
-- **Node.js** 18+ and **npm**
+- **Node.js** 18+ and **npm** / **pnpm**
 - **Tesseract OCR** ([Download here](https://github.com/UB-Mannheim/tesseract/wiki))
-- A **Groq API Key** ([Get one free](https://console.groq.com))
+- A **Google Gemini API Key** ([Get one free on Google AI Studio](https://aistudio.google.com/))
+- A **Supabase Project** ([Create free project](https://supabase.com))
 
 ### 1. Clone the Repository
 
@@ -182,16 +187,24 @@ python -m venv .venv
 # macOS / Linux
 source .venv/bin/activate
 
-# Install Python dependencies
-pip install fastapi uvicorn python-dotenv langchain langchain-community langchain-huggingface langchain-groq chromadb pdfplumber pytesseract Pillow pydantic
+# Install Python dependencies from requirements.txt
+pip install -r requirements.txt
 ```
 
 ### 3. Configure Environment Variables
 
-Create a `.env` file inside the `backend/` directory:
+Create a `.env` file inside the `backend/` directory (you can copy `.env.example`):
+
+```bash
+cp .env.example .env
+```
+
+And update it with your credentials:
 
 ```env
-GROQ_API_KEY=your_groq_api_key_here
+GEMINI_API_KEY=your_gemini_api_key_here
+SUPABASE_URL=https://your-project-ref.supabase.co
+SUPABASE_SERVICE_KEY=your_supabase_secret_service_role_key
 ```
 
 ### 4. Build the Vector Database
@@ -223,6 +236,9 @@ cd ../frontend
 
 # Install dependencies
 npm install
+
+# Optional: configure a non-default backend URL in frontend/.env
+# VITE_API_URL=http://localhost:8000
 
 # Start development server
 npm run dev
@@ -288,7 +304,7 @@ Upload a legal document (PDF or image) for AI-powered text extraction and analys
 | 💬 **Conversation Memory** | Maintains session-based chat history for contextual follow-ups |
 | 📄 **Document Scanner** | Upload FIRs, legal notices, or agreements — get instant risk assessment |
 | 🔍 **OCR Capability** | Extract text from scanned images of legal documents via Tesseract |
-| ⚡ **Blazing Fast Inference** | Powered by Groq Cloud for near-instant Llama 3.3 70B responses |
+| ⚡ **Resilient Multi-Model Inference** | Powered by Google Gemini (`gemini-3.5-flash`, `gemini-3.7-flash`) with automatic fallback handling |
 | 🎭 **Empathy-First Responses** | Detects user distress and adapts tone from informational to supportive |
 | 📋 **Structured Output** | Every response follows: Empathy → Action → Legal Basis → Next Steps |
 
@@ -316,8 +332,8 @@ This runs a sample query (`"What is the punishment for online fraud or cyber cri
 
 ## 🗺️ Roadmap
 
-- [ ] Build full chat UI with message history & document upload
-- [ ] Add user authentication & persistent session storage
+- [x] Build chat UI with message history & document upload
+- [x] Add user authentication & persistent session storage
 - [ ] Expand knowledge base with more Indian statutes (CrPC, BNSS, Evidence Act)
 - [ ] Implement streaming responses for real-time output
 - [ ] Add legal document drafting (complaint letters, RTI applications)

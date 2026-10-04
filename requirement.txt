@@ -1,0 +1,5 @@
+# ===========================================
+# JurixAI — Python Dependencies Alias
+# ===========================================
+# Alias for requirements.txt to ensure seamless compatibility with singular "requirement.txt" commands:
+-r requirements.txt

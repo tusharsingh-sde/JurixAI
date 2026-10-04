@@ -1,38 +1,56 @@
+# ===========================================
+# JurixAI — Comprehensive .gitignore
+# ===========================================
 
-# envs & Secrets
-
+# Environments & Secret Keys
 .env
+.env.*
 **/.env
 **/.env.*
+*.local
 !**/.env.example
 
-
-# for Python / Backend
-
-# Virtual environments
+# Python / Virtual Environments
 .venv/
 venv/
 env/
 ENV/
+env.bak/
+venv.bak/
 
-# Byte-compiled / optimized / DLL files
+# Byte-compiled / cache / optimized files
 __pycache__/
 **/__pycache__/
 *.py[cod]
 *$py.class
+*.pyo
+*.pyd
 
-# Distribution / packaging
-*.egg
-*.egg-info/
-dist/
+# Distribution / Packaging
 build/
+develop-eggs/
+dist/
+**/dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+*.manifest
+*.spec
 *.whl
 
-# Installer logs
+# Installer logs & unit tests
 pip-log.txt
 pip-delete-this-directory.txt
-
-# Unit test / coverage
 htmlcov/
 .tox/
 .nox/
@@ -43,23 +61,31 @@ htmlcov/
 *.py,cover
 .pytest_cache/
 
-# mypy / type-checkers
+# Static type checkers & linters
 .mypy_cache/
 .pytype/
 .pyre/
+.ruff_cache/
 
-# ChromaDB / Vector store data
+# ChromaDB / Vector Store Data
 Jurixai_db/
+**/Jurixai_db/
+chroma.sqlite3
+*.sqlite3
 
-# Large archive artifacts
-backend.zip
-
-# Node.js / Frontend
+# Node.js / Frontend dependencies & caches
 node_modules/
-frontend/node_modules/
-frontend/dist/
-frontend/dist-ssr/
-*.local
+**/node_modules/
+.pnpm-store/
+**/.pnpm-store/
+.npm/
+.yarn/
+.vite/
+**/.vite/
+.parcel-cache/
+.turbo/
+dist-ssr/
+**/dist-ssr/
 
 # Logs
 logs/
@@ -70,7 +96,7 @@ yarn-error.log*
 pnpm-debug.log*
 lerna-debug.log*
 
-# IDE & Editors
+# IDE & Editor Configurations
 .vscode/*
 !.vscode/settings.json
 !.vscode/extensions.json
@@ -84,17 +110,25 @@ lerna-debug.log*
 *.sublime-project
 *.code-workspace
 
-
-# OS Files
-
+# Operating System Files
 .DS_Store
-Thumbs.db
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
 ehthumbs.db
+Thumbs.db
 Desktop.ini
 $RECYCLE.BIN/
 *.lnk
 
-# Misc
+# Archive / Large Artifacts
+*.zip
+*.tar.gz
+*.rar
+backend.zip
+
+# Temporary / Scratch Files
 *.bak
 *.tmp
 *.temp
