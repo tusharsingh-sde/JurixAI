@@ -75,6 +75,9 @@ htmlcov/
 !backend/Jurixai_db/
 !backend/Jurixai_db/**
 
+# Local model cache — large binary weights, not needed in git (Docker COPY handles it)
+backend/local_model_cache/
+
 # Node.js / Frontend dependencies & caches
 node_modules/
 **/node_modules/

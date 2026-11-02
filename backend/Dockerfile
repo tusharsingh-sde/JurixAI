@@ -28,7 +28,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Pre-download HuggingFace embedding model at build time into fixed HF_HOME
-RUN python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('all-MiniLM-L6-v2')"
+COPY ./local_model_cache/all-MiniLM-L6-v2 /app/local_model_cache/all-MiniLM-L6-v2
 
 # Create non-root application user
 RUN useradd -m -u 1000 appuser
@@ -38,7 +38,7 @@ COPY backend.py .
 COPY Jurixai_db ./Jurixai_db
 
 # Ensure appuser owns and has read+write permissions on Jurixai_db and HF_HOME cache
-RUN chown -R appuser:appuser /app/Jurixai_db /app/hf_cache
+RUN chown -R appuser:appuser /app/Jurixai_db /app/local_model_cache
 USER appuser
 
 EXPOSE 8000

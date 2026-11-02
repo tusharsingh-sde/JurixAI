@@ -13,6 +13,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, field_validator
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
+from sentence_transformers import SentenceTransformer
 from langchain_chroma import Chroma
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_google_genai import ChatGoogleGenerativeAI
@@ -29,6 +30,7 @@ from datetime import datetime, timezone, timedelta
 # Settings & Configuration
 # =====================================================================
 load_dotenv()
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 logger = logging.getLogger("jurixai")
@@ -110,15 +112,26 @@ supabase_url = SUPABASE_URL
 supabase_key = SUPABASE_SECRET_KEY
 
 # Shared references (populated during application lifespan startup)
+model = None
 embeddings = None
 db = None
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global embeddings, db
-    logger.info("Lifespan startup: Loading HuggingFace embeddings and Chroma DB...")
-    embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
+    global model, embeddings, db
+    logger.info("Lifespan startup: Loading embedding model and Chroma DB...")
+    try:
+        model = SentenceTransformer('/app/local_model_cache/all-MiniLM-L6-v2')
+        embeddings = HuggingFaceEmbeddings(model_name='/app/local_model_cache/all-MiniLM-L6-v2')
+    except Exception as e:
+        logger.info("Container model path not found (%s), falling back to local model cache...", e)
+        local_model_path = os.path.join(BASE_DIR, "local_model_cache", "all-MiniLM-L6-v2")
+        model_path = local_model_path if os.path.exists(local_model_path) else "all-MiniLM-L6-v2"
+        model = SentenceTransformer(model_path)
+        embeddings = HuggingFaceEmbeddings(model_name=model_path)
+
     db = Chroma(persist_directory=CHROMA_DIR, embedding_function=embeddings)
+    app.state.model = model
     app.state.embeddings = embeddings
     app.state.db = db
     logger.info("Lifespan startup complete: Chroma loaded (collection count: %d)", db._collection.count())
@@ -182,12 +195,21 @@ app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 has_wildcard_origin = "*" in ALLOWED_ORIGINS
 allow_credentials = not has_wildcard_origin
 
+# Allow all localhost / 127.0.0.1 ports (5173, 5174, etc.) and private local IPs in development
+dev_origin_regex = (
+    r"^https?://(localhost|127\.0\.0\.1|192\.168\.\d+\.\d+|10\.\d+\.\d+\.\d+|172\.(1[6-9]|2\d|3[01])\.\d+\.\d+)(:[0-9]+)?$"
+    if not ALLOWED_ORIGINS_RAW
+    else None
+)
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOWED_ORIGINS,
+    allow_origin_regex=dev_origin_regex,
     allow_credentials=allow_credentials,
     allow_methods=["*"],
     allow_headers=["*"],
+    allow_private_network=True,
 )
 
 # Gemini Model Cache
