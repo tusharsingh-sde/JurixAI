@@ -3,7 +3,9 @@ import uuid
 import logging
 from typing import Optional
 from dotenv import load_dotenv
+from contextlib import asynccontextmanager
 from fastapi import FastAPI, UploadFile, File, HTTPException, Depends
+from fastapi.concurrency import run_in_threadpool
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -95,9 +97,28 @@ supabase_url = SUPABASE_URL
 supabase_key = SUPABASE_SECRET_KEY
 supabase: Client = create_client(supabase_url, supabase_key)
 
-#FastAPI Initialization
-app = FastAPI(title="JurixAI Backend", description="Elite Legal RAG Engine")
+# Shared references (populated during application lifespan startup)
+embeddings = None
+db = None
 
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    global embeddings, db
+    logger.info("Lifespan startup: Loading HuggingFace embeddings and Chroma DB...")
+    embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
+    db = Chroma(persist_directory=CHROMA_DIR, embedding_function=embeddings)
+    app.state.embeddings = embeddings
+    app.state.db = db
+    logger.info("Lifespan startup complete: Chroma loaded (collection count: %d)", db._collection.count())
+    yield
+    logger.info("Lifespan shutdown: JurixAI backend stopped.")
+
+# FastAPI Initialization
+app = FastAPI(
+    title="JurixAI Backend",
+    description="Elite Legal RAG Engine",
+    lifespan=lifespan,
+)
 
 # CORS Middleware
 has_wildcard_origin = "*" in ALLOWED_ORIGINS
@@ -111,19 +132,27 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Gemini Model Cache
+_model_cache: dict[str, ChatGoogleGenerativeAI] = {}
 
+def get_gemini_model(model_name: str, timeout: float = 30.0) -> ChatGoogleGenerativeAI:
+    """Return a cached ChatGoogleGenerativeAI instance for the given model name."""
+    cache_key = f"{model_name}_{timeout}"
+    if cache_key not in _model_cache:
+        _model_cache[cache_key] = ChatGoogleGenerativeAI(
+            model=model_name,
+            max_retries=2,
+            timeout=timeout,
+        )
+    return _model_cache[cache_key]
 
-
-print("Loading JurixAI")
-embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
-db = Chroma(persist_directory=CHROMA_DIR, embedding_function=embeddings)
-def invoke_gemini(prompt: str) -> str:
+def invoke_gemini(prompt: str, timeout: float = 30.0) -> str:
     """Invokes Gemini with automatic model fallback to prevent 503 high demand errors."""
     models = GEMINI_MODELS
     last_err = None
     for model_name in models:
         try:
-            model = ChatGoogleGenerativeAI(model=model_name, max_retries=2)
+            model = get_gemini_model(model_name, timeout=timeout)
             res = model.invoke(prompt)
             logger.info("Gemini invocation succeeded with model '%s'", model_name)
             if isinstance(res.content, list):
@@ -213,15 +242,20 @@ def health_check():
 
 @app.get("/ready")
 def readiness_check():
-    """Readiness probe: verifies that Chroma vector store is loaded and ready."""
+    """Readiness probe: verifies that Chroma vector store is loaded and ready on app.state."""
     current_db = getattr(app.state, "db", None) or db
     if current_db is None:
         raise HTTPException(status_code=503, detail="Vector store not initialized")
+    try:
+        current_db._collection.count()
+    except Exception as e:
+        logger.error("Readiness check failed during collection count: %s", e)
+        raise HTTPException(status_code=503, detail="Vector store probe failed")
     return {"status": "ready"}
 
 
 @app.post("/signup")
-async def signup(request: AuthRequest):
+def signup(request: AuthRequest):
     """Create a new JurixAI user account (automatically confirmed)."""
     try:
         response = supabase.auth.admin.create_user({
@@ -241,7 +275,7 @@ async def signup(request: AuthRequest):
 
 
 @app.post("/login")
-async def login(request: AuthRequest):
+def login(request: AuthRequest):
     """Log in and receive an access token for authenticated requests."""
     try:
         response = supabase.auth.sign_in_with_password({
@@ -262,14 +296,14 @@ async def login(request: AuthRequest):
 
 
 @app.post("/logout")
-async def logout(user=Depends(get_current_user)):
+def logout(user=Depends(get_current_user)):
     """Log out the current user."""
     supabase.auth.sign_out()
     return {"status": "success", "message": "Logged out successfully."}
 
 #SESSION ENDPOINTS
 @app.post("/sessions")
-async def create_session(request: NewSessionRequest, user=Depends(get_current_user)):
+def create_session(request: NewSessionRequest, user=Depends(get_current_user)):
     """Create a new chat session for the authenticated user."""
     try:
         response = supabase.table("sessions").insert({
@@ -282,7 +316,7 @@ async def create_session(request: NewSessionRequest, user=Depends(get_current_us
 
 
 @app.get("/sessions")
-async def list_sessions(user=Depends(get_current_user)):
+def list_sessions(user=Depends(get_current_user)):
     """List all sessions for the authenticated user, newest first."""
     try:
         response = supabase.table("sessions") \
@@ -296,7 +330,7 @@ async def list_sessions(user=Depends(get_current_user)):
 
 
 @app.get("/sessions/{session_id}/messages")
-async def get_session_messages(session_id: str, user=Depends(get_current_user)):
+def get_session_messages(session_id: str, user=Depends(get_current_user)):
     """Fetch all messages for a specific session (must be owned by the user)."""
     try:
         # Verify the user owns this session
@@ -321,7 +355,7 @@ async def get_session_messages(session_id: str, user=Depends(get_current_user)):
 
 
 @app.delete("/sessions/{session_id}")
-async def delete_session(session_id: str, user=Depends(get_current_user)):
+def delete_session(session_id: str, user=Depends(get_current_user)):
     """Delete a session and all its messages (cascade handled by DB)."""
     try:
         supabase.table("sessions") \
@@ -334,30 +368,29 @@ async def delete_session(session_id: str, user=Depends(get_current_user)):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-#DOCUMENT UPLOAD ENDPOINT
+# DOCUMENT UPLOAD ENDPOINT
+
+def extract_document_text_sync(filename: str, content: bytes) -> str:
+    extracted_text = ""
+    if filename.lower().endswith(".pdf"):
+        with pdfplumber.open(io.BytesIO(content)) as pdf:
+            for page in pdf.pages:
+                page_text = page.extract_text()
+                if page_text:
+                    extracted_text += page_text + "\n"
+    elif filename.lower().endswith((".png", ".jpg", ".jpeg")):
+        image = Image.open(io.BytesIO(content))
+        extracted_text = pytesseract.image_to_string(image)
+    else:
+        raise HTTPException(status_code=400, detail="Only PDF and image files (JPG/PNG/JPEG) are allowed.")
+    return " ".join(extracted_text.split())
 
 @app.post("/upload")
 async def process_document(file: UploadFile = File(...), user=Depends(get_current_user)):
     """Upload a PDF or image document and extract its text content."""
     try:
         content = await file.read()
-        extracted_text = ""
-
-        if file.filename.lower().endswith(".pdf"):
-            with pdfplumber.open(io.BytesIO(content)) as pdf:
-                for page in pdf.pages:
-                    page_text = page.extract_text()
-                    if page_text:
-                        extracted_text += page_text + "\n"
-
-        elif file.filename.lower().endswith((".png", ".jpg", ".jpeg")):
-            image = Image.open(io.BytesIO(content))
-            extracted_text = pytesseract.image_to_string(image)
-
-        else:
-            raise HTTPException(status_code=400, detail="Only PDF and image files (JPG/PNG/JPEG) are allowed.")
-
-        cleaned_text = " ".join(extracted_text.split())
+        cleaned_text = await run_in_threadpool(extract_document_text_sync, file.filename, content)
         return {
             "status": "success",
             "filename": file.filename,
@@ -372,7 +405,7 @@ async def process_document(file: UploadFile = File(...), user=Depends(get_curren
 #MAIN CHAT ENDPOINT
 
 @app.post("/chat")
-async def chat_with_jurix(request: UserRequest, user=Depends(get_current_user)):
+def chat_with_jurix(request: UserRequest, user=Depends(get_current_user)):
     """
     Main chat endpoint. Requires an authenticated user and a valid session_id.
     Saves all messages to Supabase with full history context.
@@ -419,7 +452,10 @@ async def chat_with_jurix(request: UserRequest, user=Depends(get_current_user)):
         history_text = get_history_for_prompt(session_id)
 
         # RAG: fetch relevant legal knowledge from ChromaDB
-        results = db.similarity_search(user_msg, k=5)
+        current_db = getattr(app.state, "db", None) or db
+        if current_db is None:
+            raise HTTPException(status_code=503, detail="Vector store not initialized")
+        results = current_db.similarity_search(user_msg, k=5)
         context_text = "\n\n".join([doc.page_content for doc in results])
         #promt to gemini
         prompt = f"""
