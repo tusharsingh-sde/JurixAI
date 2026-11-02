@@ -38,15 +38,16 @@ Configure these variables in your production environment / platform dashboard (e
 | `SUPABASE_SECRET_KEY` | **Yes** | — | Supabase **Service Role** Key (used for backend database queries and admin actions). |
 | `SUPABASE_ANON_KEY` | **Yes** | — | Supabase **Anon** Key (used strictly for credential verification). |
 | `ALLOWED_ORIGINS` | **Yes** | `localhost` | Comma-separated CORS allowed origins (e.g. `https://jurixai.com,https://app.jurixai.com`). Never use `*` in production. |
-| `FORWARDED_ALLOW_IPS` | **Yes** | `127.0.0.1` | Trusted proxy IP/CIDR for Uvicorn `--forwarded-allow-ips`. Set to your platform's load balancer or reverse proxy CIDR (e.g., `*` on isolated ingress proxies like Cloud Run or Railway). |
+| `FORWARDED_ALLOW_IPS` | **Yes** | `127.0.0.1` | Trusted proxy IP/CIDR for Uvicorn `--forwarded-allow-ips`. Set to your platform's specific proxy IPs/CIDR (never use wildcard `*` indiscriminately) and always run the spoofed X-Forwarded-For signup test after deploy. |
 | `GEMINI_MODELS` | No | `gemini-3.5-flash,...` | Comma-separated fallback model sequence for Gemini invocations. |
 | `MAX_UPLOAD_MB` | No | `8` | Maximum allowable document upload size in megabytes. |
 | `MAX_MESSAGE_CHARS` | No | `4000` | Maximum character length for chat input messages. |
 | `PORT` | No | `8000` | Port on which the container listens. |
 
 > [!WARNING]
-> **REVERSE PROXY RATE LIMITING WARNING**:
-> If the `PORT` environment variable is set (typical in cloud platform environments like Cloud Run, Render, or Railway) and `FORWARDED_ALLOW_IPS` is left at the default `127.0.0.1`, Uvicorn will discard the client IP headers and use the platform proxy IP. As a result, **all users will share a single rate-limit bucket**! Set `FORWARDED_ALLOW_IPS` to your proxy's IP/subnet (or `*` if the container runs behind an isolated platform ingress).
+> **REVERSE PROXY RATE LIMITING & SPOOFING WARNING**:
+> If the `PORT` environment variable is set (typical in cloud platform environments like Cloud Run, Render, or Railway) and `FORWARDED_ALLOW_IPS` is left at the default `127.0.0.1`, Uvicorn will discard the client IP headers and use the platform proxy IP, causing **all users to share a single rate-limit bucket**!
+> Set `FORWARDED_ALLOW_IPS` to the platform's proxy IPs/CIDR (do not recommend or use `*`), and always run the post-deploy spoofed X-Forwarded-For signup test to verify client isolation.
 
 ---
 

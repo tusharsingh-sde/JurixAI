@@ -44,10 +44,11 @@ USER appuser
 EXPOSE 8000
 
 # Container liveness health check using Python urllib (no external curl binary needed)
-HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+# 120s start-period allows embedding model and ChromaDB to initialize on cold starts
+HEALTHCHECK --interval=30s --timeout=10s --start-period=120s --retries=3 \
     CMD python -c "import os, urllib.request; port = os.getenv('PORT', '8000'); urllib.request.urlopen(f'http://127.0.0.1:{port}/health')" || exit 1
 
 # Launch Uvicorn:
 # - Each worker loads sentence-transformers (~350MB) and ChromaDB into memory. Keeping --workers 1 bounds container RAM < 800MB.
-# - Proxy headers enabled; FORWARDED_ALLOW_IPS read from env var (defaults to 127.0.0.1, set to platform proxy IP in production).
+# - Proxy headers enabled; FORWARDED_ALLOW_IPS read from env var (set to platform proxy IP/CIDR in production).
 CMD ["sh", "-c", "exec uvicorn backend:app --host 0.0.0.0 --port ${PORT:-8000} --workers 1 --proxy-headers --forwarded-allow-ips \"${FORWARDED_ALLOW_IPS:-127.0.0.1}\""]

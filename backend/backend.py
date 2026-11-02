@@ -132,7 +132,8 @@ async def lifespan(app: FastAPI):
             "⚠️ SECURITY / RATE-LIMIT WARNING: PORT environment variable is set (%s), but "
             "FORWARDED_ALLOW_IPS is using default '127.0.0.1'. If running behind a reverse proxy "
             "(Cloud Run, Railway, Render, etc.), client IP resolution will fail and all users "
-            "will share a single rate-limit bucket! Set FORWARDED_ALLOW_IPS to the proxy IP/CIDR (or '*' if proxy ingress is isolated).",
+            "will share a single rate-limit bucket! Set FORWARDED_ALLOW_IPS to the platform's proxy IPs/CIDR "
+            "and always run the spoofed X-Forwarded-For signup test after deploy.",
             port_env
         )
     yield
@@ -424,11 +425,11 @@ def readiness_check():
     if current_db is None:
         raise HTTPException(status_code=503, detail="Vector store not initialized")
     try:
-        current_db._collection.count()
+        doc_count = current_db._collection.count()
     except Exception as e:
         logger.error("Readiness check failed during collection count: %s", e)
         raise HTTPException(status_code=503, detail="Vector store probe failed")
-    return {"status": "ready"}
+    return {"status": "ready", "documents_loaded": doc_count}
 
 
 @app.post("/signup")
