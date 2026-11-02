@@ -15,41 +15,80 @@ from PIL import Image
 import pytesseract
 import io
 
-# Environment setup
+# =====================================================================
+# Settings & Configuration
+# =====================================================================
 load_dotenv()
-gemini_api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
-if gemini_api_key:
-    os.environ["GOOGLE_API_KEY"] = gemini_api_key
-else:
-    print("⚠️ Warning: Neither GEMINI_API_KEY nor GOOGLE_API_KEY is configured in backend/.env")
+
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_SECRET_KEY = os.getenv("SUPABASE_SECRET_KEY") or os.getenv("SUPABASE_SERVICE_KEY")
+SUPABASE_ANON_KEY = os.getenv("SUPABASE_ANON_KEY")
+
+# Fail fast at startup if critical credentials are missing
+missing_configs = []
+if not GEMINI_API_KEY:
+    missing_configs.append("GEMINI_API_KEY (or GOOGLE_API_KEY)")
+if not SUPABASE_URL:
+    missing_configs.append("SUPABASE_URL")
+if not SUPABASE_SECRET_KEY:
+    missing_configs.append("SUPABASE_SECRET_KEY (or SUPABASE_SERVICE_KEY)")
+if not SUPABASE_ANON_KEY:
+    missing_configs.append("SUPABASE_ANON_KEY")
+
+if missing_configs:
+    raise RuntimeError(
+        f"Missing required environment variables: {', '.join(missing_configs)}. "
+        "Please set these in your environment or .env file before starting the application."
+    )
+
+os.environ["GOOGLE_API_KEY"] = GEMINI_API_KEY
+
+ALLOWED_ORIGINS_RAW = os.getenv("ALLOWED_ORIGINS", "")
+ALLOWED_ORIGINS = [
+    origin.strip() for origin in ALLOWED_ORIGINS_RAW.split(",") if origin.strip()
+] if ALLOWED_ORIGINS_RAW else [
+    "http://localhost:5173",
+    "http://localhost:3000",
+    "http://127.0.0.1:5173",
+    "http://127.0.0.1:3000",
+]
+
+GEMINI_MODELS_RAW = os.getenv("GEMINI_MODELS", "gemini-3.5-flash,gemini-3.5-flash-lite,gemini-3.7-flash")
+GEMINI_MODELS = [m.strip() for m in GEMINI_MODELS_RAW.split(",") if m.strip()]
+
+try:
+    MAX_UPLOAD_MB = int(os.getenv("MAX_UPLOAD_MB", "8"))
+except ValueError:
+    MAX_UPLOAD_MB = 8
+
+try:
+    MAX_MESSAGE_CHARS = int(os.getenv("MAX_MESSAGE_CHARS", "4000"))
+except ValueError:
+    MAX_MESSAGE_CHARS = 4000
+
+CHROMA_DIR = os.getenv("CHROMA_DIR", "./Jurixai_db")
 
 # Tesseract OCR path configuration
 # 1. Custom path via TESSERACT_PATH environment variable
-# 2. Well-known Windows paths if they exist
+# 2. Generic Windows fallbacks
 # 3. Default to system PATH (Linux / Docker / macOS / systems where tesseract is in PATH)
 custom_tesseract = os.getenv("TESSERACT_PATH")
 if custom_tesseract and os.path.exists(custom_tesseract):
     pytesseract.pytesseract.tesseract_cmd = custom_tesseract
 elif os.name == "nt":
     candidate_tesseract_paths = [
-        r'C:\Users\tstus\AppData\Local\Programs\Tesseract-OCR\tesseract.exe',
-        r'C:\Program Files\Tesseract-OCR\tesseract.exe',
-        r'C:\Program Files (x86)\Tesseract-OCR\tesseract.exe',
+        r"C:\Program Files\Tesseract-OCR\tesseract.exe",
+        r"C:\Program Files (x86)\Tesseract-OCR\tesseract.exe",
     ]
     for candidate_path in candidate_tesseract_paths:
         if os.path.exists(candidate_path):
             pytesseract.pytesseract.tesseract_cmd = candidate_path
             break
 
-#supabase client
-supabase_url = os.getenv("SUPABASE_URL")
-supabase_key = os.getenv("SUPABASE_SECRET_KEY") or os.getenv("SUPABASE_SERVICE_KEY")
-
-if not supabase_url or not supabase_key:
-    raise RuntimeError(
-        "❌ Missing Supabase credentials! Please set SUPABASE_URL and SUPABASE_SECRET_KEY (or SUPABASE_SERVICE_KEY) in backend/.env"
-    )
-
+# Supabase Client
+supabase_url = SUPABASE_URL
+supabase_key = SUPABASE_SECRET_KEY
 supabase: Client = create_client(supabase_url, supabase_key)
 
 #FastAPI Initialization
@@ -67,11 +106,11 @@ app.add_middleware(
 )
 
 
-#AI Brain Loading
+
 
 print("Loading JurixAI")
 embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
-db = Chroma(persist_directory="./Jurixai_db", embedding_function=embeddings)
+db = Chroma(persist_directory=CHROMA_DIR, embedding_function=embeddings)
 def invoke_gemini(prompt: str) -> str:
     """Invokes Gemini with automatic model fallback to prevent 503 high demand errors."""
     models = ["gemini-3.5-flash", "gemini-3.5-flash-lite", "gemini-3.7-flash"]
