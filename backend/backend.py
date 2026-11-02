@@ -551,9 +551,23 @@ def delete_session(session_id: str, user=Depends(get_current_user)):
 # DOCUMENT UPLOAD ENDPOINT
 
 # Configure PIL safe limits to prevent decompression bomb denial-of-service
-Image.MAX_IMAGE_PIXELS = 50_000_000
+Image.MAX_IMAGE_PIXELS = 25_000_000
 warnings.simplefilter('error', Image.DecompressionBombWarning)
 MAX_IMAGE_DIMENSION = 2000
+
+def run_tesseract_ocr(image: Image.Image) -> str:
+    """Run OCR with 'eng+hin' languages, falling back to 'eng' if Hindi traineddata is missing."""
+    try:
+        return pytesseract.image_to_string(image, lang="eng+hin")
+    except pytesseract.TesseractError as e:
+        err_str = str(e).lower()
+        if "hin" in err_str or "traineddata" in err_str or "language" in err_str:
+            logger.warning("Tesseract 'eng+hin' failed, falling back to 'eng': %s", e)
+            return pytesseract.image_to_string(image, lang="eng")
+        raise
+    except Exception as e:
+        logger.warning("OCR failed with 'eng+hin', attempting fallback to 'eng': %s", e)
+        return pytesseract.image_to_string(image, lang="eng")
 
 def extract_document_text_sync(filename: str, content: bytes) -> tuple[str, bool]:
     extracted_text = ""
@@ -588,7 +602,7 @@ def extract_document_text_sync(filename: str, content: bytes) -> tuple[str, bool
                             page_img = page.to_image(resolution=200).original
                             if page_img.mode not in ("L", "RGB"):
                                 page_img = page_img.convert("RGB")
-                            ocr_text = pytesseract.image_to_string(page_img)
+                            ocr_text = run_tesseract_ocr(page_img)
                             if ocr_text:
                                 extracted_text += ocr_text + "\n"
                         except Exception as page_ocr_err:
@@ -607,7 +621,7 @@ def extract_document_text_sync(filename: str, content: bytes) -> tuple[str, bool
             if image.mode not in ("L", "RGB"):
                 image = image.convert("RGB")
 
-            extracted_text = pytesseract.image_to_string(image)
+            extracted_text = run_tesseract_ocr(image)
         except (Image.DecompressionBombError, Image.DecompressionBombWarning):
             logger.warning("Decompression bomb detected in uploaded image.")
             raise HTTPException(status_code=422, detail="Image exceeds maximum dimensions (decompression bomb protection).")
@@ -734,27 +748,42 @@ def chat_with_jurix(request: Request, body: UserRequest, user=Depends(get_curren
         session_data = None
         if is_valid_uuid:
             res = supabase.table("sessions") \
-                .select("id, title") \
+                .select("id, title, document_text, document_name") \
                 .eq("id", session_id) \
                 .eq("user_id", str(user.id)) \
                 .execute()
             if res.data:
                 session_data = res.data[0]
 
+        # Determine active document text (request override or persistent session document)
+        active_doc_text = None
+        if body.document_text:
+            active_doc_text = body.document_text[:30000]
+        elif session_data and session_data.get("document_text"):
+            active_doc_text = session_data["document_text"]
+
         # If no valid existing session, auto-create one for this user
         if not session_data:
             short_title = user_msg[:50] + ("..." if len(user_msg) > 50 else "")
-            new_session = supabase.table("sessions").insert({
+            new_session_payload = {
                 "user_id": str(user.id),
                 "title": short_title
-            }).execute()
+            }
+            if active_doc_text:
+                new_session_payload["document_text"] = active_doc_text
+            new_session = supabase.table("sessions").insert(new_session_payload).execute()
             session_id = new_session.data[0]["id"]
-        elif session_data.get("title") == "New Conversation":
-            short_title = user_msg[:50] + ("..." if len(user_msg) > 50 else "")
-            supabase.table("sessions") \
-                .update({"title": short_title}) \
-                .eq("id", session_id) \
-                .execute()
+        else:
+            update_payload = {}
+            if session_data.get("title") == "New Conversation":
+                update_payload["title"] = user_msg[:50] + ("..." if len(user_msg) > 50 else "")
+            if body.document_text:
+                update_payload["document_text"] = active_doc_text
+            if update_payload:
+                supabase.table("sessions") \
+                    .update(update_payload) \
+                    .eq("id", session_id) \
+                    .execute()
 
         # Build conversation history context
         history_text = get_history_for_prompt(session_id)
@@ -771,8 +800,8 @@ def chat_with_jurix(request: Request, body: UserRequest, user=Depends(get_curren
         safe_user_msg = sanitize_prompt_tags(user_msg)
 
         doc_section = ""
-        if body.document_text:
-            safe_doc = sanitize_prompt_tags(body.document_text)
+        if active_doc_text:
+            safe_doc = sanitize_prompt_tags(active_doc_text)
             doc_section = f"\n\nUSER UPLOADED DOCUMENT:\n<uploaded_document>\n{safe_doc}\n</uploaded_document>"
 
         #promt to gemini
