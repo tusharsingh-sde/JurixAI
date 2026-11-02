@@ -12,15 +12,7 @@ async function request(path, { token, ...options } = {}) {
   if (options.body && !(options.body instanceof FormData)) headers.set('Content-Type', 'application/json')
   const response = await fetch(`${API_URL}${path}`, { ...options, headers })
   const data = await response.json().catch(() => ({}))
-  if (!response.ok) {
-    let errorMsg = data.detail || data.message || `Request failed (${response.status})`
-    if (Array.isArray(errorMsg)) {
-      errorMsg = errorMsg.map((err) => err.msg || JSON.stringify(err)).join(', ')
-    } else if (typeof errorMsg === 'object') {
-      errorMsg = JSON.stringify(errorMsg)
-    }
-    throw new Error(errorMsg)
-  }
+  if (!response.ok) throw new Error(data.detail || data.message || `Request failed (${response.status})`)
   return data
 }
 
@@ -131,7 +123,7 @@ function App() {
     } catch (e) { setError(e.message) }
   }
 
-  async function sendMessage(text = draft, documentText = null) {
+  async function sendMessage(text = draft) {
     const content = text.trim()
     if (!content || busy) return
     if (!token) {
@@ -145,11 +137,9 @@ function App() {
     setMessages((current) => [...current, userMessage])
     setBusy(true)
     try {
-      const payload = { session_id: activeSession?.id || null, message: content }
-      if (documentText) payload.document_text = documentText
       const data = await request('/chat', {
         method: 'POST', token,
-        body: JSON.stringify(payload),
+        body: JSON.stringify({ session_id: activeSession?.id || null, message: content }),
       })
       setMessages((current) => [...current, { id: crypto.randomUUID(), role: 'assistant', content: data.reply }])
       let session = activeSession
@@ -173,7 +163,7 @@ function App() {
       const data = await request('/upload', { method: 'POST', token, body: formData })
       if (!data.extracted_text?.trim()) throw new Error('No readable text was found. Try a clearer scan or image.')
       setPendingFile(null)
-      await sendMessage(`Please review this uploaded ${file.name} and explain the important details, risks, deadlines, and what I should do next.`, data.extracted_text)
+      await sendMessage(`Please review this uploaded ${file.name} and explain the important details, risks, deadlines, and what I should do next.\n\nDOCUMENT TEXT:\n${data.extracted_text}`)
     } catch (e) { setError(e.message); setPendingFile(null) }
     finally { setUploading(false); if (fileRef.current) fileRef.current.value = '' }
   }
