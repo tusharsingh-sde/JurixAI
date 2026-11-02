@@ -22,6 +22,9 @@ from PIL import Image
 import pytesseract
 import io
 import warnings
+import threading
+from collections import defaultdict
+from datetime import datetime, timezone, timedelta
 
 # =====================================================================
 # Settings & Configuration
@@ -249,40 +252,137 @@ def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(securit
     except Exception:
         raise HTTPException(status_code=401, detail="Invalid or expired token. Please log in again.")
 
-#History Helper — rolling summary for long conversations
-MAX_VERBATIM = 10       # Last N messages sent as-is
-SUMMARY_THRESHOLD = 20  # Summarize when total messages exceed this
+# History Helper — rolling summary with database caching and monotonic concurrency safety
+MAX_VERBATIM = 10        # Last N messages sent as-is
+SUMMARY_BATCH_MIN = 10   # Only re-summarize when 10+ new old messages accumulate
+
+# Per-session lock for in-process concurrency safety
+_session_locks = defaultdict(threading.Lock)
+_session_locks_guard = threading.Lock()
+
+def _get_session_lock(session_id: str) -> threading.Lock:
+    with _session_locks_guard:
+        return _session_locks[session_id]
 
 def get_history_for_prompt(session_id: str) -> str:
     """
-    Fetch messages from Supabase.
-    For long conversations, old messages are summarized to save tokens.
+    Fetch history for prompt:
+    1. Query cached summary and summary_upto from sessions table.
+    2. Fetch only the last N messages (desc + limit, then reverse) selecting only needed columns.
+    3. If total messages exceed verbatim window, query old messages between summary_upto and verbatim window.
+    4. Only invoke Gemini to re-summarize when 10+ new old messages have accumulated since summary_upto.
+    5. Handle concurrent requests safely with per-session locking and monotonic database updates.
     """
-    all_msgs = supabase.table("messages") \
-        .select("role, content") \
+    # 1. Fetch cached summary metadata for the session
+    session_res = supabase.table("sessions") \
+        .select("summary, summary_upto") \
+        .eq("id", session_id) \
+        .execute()
+    session_info = session_res.data[0] if session_res.data else {}
+    stored_summary = session_info.get("summary")
+    summary_upto = session_info.get("summary_upto") or 0
+
+    # 2. Fetch only the last N messages (desc + limit, then reverse) selecting only needed columns
+    recent_msgs = supabase.table("messages") \
+        .select("role, content, seq") \
         .eq("session_id", session_id) \
-        .order("created_at", desc=False) \
+        .order("seq", desc=True) \
+        .limit(MAX_VERBATIM) \
         .execute().data
 
-    if not all_msgs:
+    if not recent_msgs:
         return "No previous conversation."
 
-    if len(all_msgs) <= MAX_VERBATIM:
-        return "\n".join(f"{m['role']}: {m['content']}" for m in all_msgs)
+    recent_msgs.reverse()
 
-    # Rolling summary: compress old messages, keep recent ones verbatim
-    old_msgs = all_msgs[:-MAX_VERBATIM]
-    recent_msgs = all_msgs[-MAX_VERBATIM:]
+    # If all messages in session fit within MAX_VERBATIM, return them verbatim without summary
+    if len(recent_msgs) < MAX_VERBATIM:
+        return "\n".join(f"{m['role']}: {m['content']}" for m in recent_msgs)
 
-    old_text = "\n".join(f"{m['role']}: {m['content']}" for m in old_msgs)
-    summary_prompt = f"""Summarize this legal conversation in 3-4 sentences.
+    # 3. Oldest verbatim seq boundary
+    oldest_verbatim_seq = recent_msgs[0].get("seq", 0)
+
+    # Fetch unsummarized old messages strictly between summary_upto and oldest_verbatim_seq
+    unsummarized = supabase.table("messages") \
+        .select("role, content, seq") \
+        .eq("session_id", session_id) \
+        .gt("seq", summary_upto) \
+        .lt("seq", oldest_verbatim_seq) \
+        .order("seq", desc=False) \
+        .execute().data or []
+
+    # 4. Check if 10+ new old messages have accumulated since summary_upto
+    if len(unsummarized) < SUMMARY_BATCH_MIN:
+        # Fewer than 10 new old messages: reuse stored summary if available
+        recent_text = "\n".join(f"{m['role']}: {m['content']}" for m in recent_msgs)
+        if stored_summary:
+            return f"[EARLIER SUMMARY]:\n{stored_summary}\n\n[RECENT MESSAGES]:\n{recent_text}"
+        elif unsummarized:
+            all_text = "\n".join(f"{m['role']}: {m['content']}" for m in unsummarized + recent_msgs)
+            return all_text
+        else:
+            return recent_text
+
+    # 5. 10+ new old messages have accumulated: re-summarize under session lock
+    lock = _get_session_lock(session_id)
+    with lock:
+        # Re-check in case a concurrent worker just updated the summary
+        fresh_session = supabase.table("sessions") \
+            .select("summary, summary_upto") \
+            .eq("id", session_id) \
+            .execute()
+        fresh_info = fresh_session.data[0] if fresh_session.data else {}
+        fresh_summary = fresh_info.get("summary")
+        fresh_upto = fresh_info.get("summary_upto") or 0
+
+        latest_unsummarized_seq = unsummarized[-1].get("seq", 0)
+        if fresh_upto >= latest_unsummarized_seq and fresh_summary:
+            recent_text = "\n".join(f"{m['role']}: {m['content']}" for m in recent_msgs)
+            return f"[EARLIER SUMMARY]:\n{fresh_summary}\n\n[RECENT MESSAGES]:\n{recent_text}"
+
+        to_summarize = supabase.table("messages") \
+            .select("role, content, seq") \
+            .eq("session_id", session_id) \
+            .gt("seq", fresh_upto) \
+            .lt("seq", oldest_verbatim_seq) \
+            .order("seq", desc=False) \
+            .execute().data or []
+
+        if len(to_summarize) < SUMMARY_BATCH_MIN and fresh_summary:
+            recent_text = "\n".join(f"{m['role']}: {m['content']}" for m in recent_msgs)
+            return f"[EARLIER SUMMARY]:\n{fresh_summary}\n\n[RECENT MESSAGES]:\n{recent_text}"
+
+        old_text = "\n".join(f"{m['role']}: {m['content']}" for m in to_summarize)
+        if fresh_summary:
+            summary_prompt = f"""Summarize this legal conversation in 3-4 sentences, incorporating the earlier summary and the new conversation turns.
+Preserve: the user's legal situation, key laws or sections mentioned, and any advice given.
+
+[EARLIER SUMMARY]:
+{fresh_summary}
+
+[NEW TURNS TO INCORPORATE]:
+{old_text}"""
+        else:
+            summary_prompt = f"""Summarize this legal conversation in 3-4 sentences.
 Preserve: the user's legal situation, key laws or sections mentioned, and any advice given.
 
 {old_text}"""
-    summary = invoke_gemini(summary_prompt)
 
-    recent_text = "\n".join(f"{m['role']}: {m['content']}" for m in recent_msgs)
-    return f"[EARLIER SUMMARY]:\n{summary}\n\n[RECENT MESSAGES]:\n{recent_text}"
+        new_summary = invoke_gemini(summary_prompt)
+        new_upto = to_summarize[-1].get("seq", 0) if to_summarize else fresh_upto
+
+        # Monotonic DB update: only write if existing summary_upto <= fresh_upto
+        supabase.table("sessions") \
+            .update({
+                "summary": new_summary,
+                "summary_upto": new_upto
+            }) \
+            .eq("id", session_id) \
+            .lte("summary_upto", fresh_upto) \
+            .execute()
+
+        recent_text = "\n".join(f"{m['role']}: {m['content']}" for m in recent_msgs)
+        return f"[EARLIER SUMMARY]:\n{new_summary}\n\n[RECENT MESSAGES]:\n{recent_text}"
 
 
 # API & AUTH ENDPOINTS
@@ -417,9 +517,9 @@ def get_session_messages(session_id: str, user=Depends(get_current_user)):
             raise HTTPException(status_code=404, detail="Session not found.")
 
         messages = supabase.table("messages") \
-            .select("id, role, content, created_at") \
+            .select("id, role, content, created_at, seq") \
             .eq("session_id", session_id) \
-            .order("created_at", desc=False) \
+            .order("seq", desc=False) \
             .execute()
         return {"session_id": session_id, "messages": messages.data}
     except HTTPException:
@@ -433,11 +533,13 @@ def get_session_messages(session_id: str, user=Depends(get_current_user)):
 def delete_session(session_id: str, user=Depends(get_current_user)):
     """Delete a session and all its messages (cascade handled by DB)."""
     try:
-        supabase.table("sessions") \
+        response = supabase.table("sessions") \
             .delete() \
             .eq("id", session_id) \
             .eq("user_id", str(user.id)) \
             .execute()
+        if not response.data:
+            raise HTTPException(status_code=404, detail="Session not found.")
         return {"status": "success", "message": "Session deleted."}
     except HTTPException:
         raise
@@ -785,11 +887,20 @@ USER'S MESSAGE:
 
         reply = invoke_gemini(prompt)
 
-        # Save both turns to Supabase (single batch insert)
+        # Save turns with explicit created_at timestamps ensuring User turn precedes JurixAI
+        now = datetime.now(timezone.utc)
+        user_created_at = (now - timedelta(milliseconds=100)).isoformat()
+        ai_created_at = now.isoformat()
+
         supabase.table("messages").insert([
-            {"session_id": session_id, "role": "User",    "content": user_msg},
-            {"session_id": session_id, "role": "JurixAI", "content": reply}
+            {"session_id": session_id, "role": "User",    "content": user_msg, "created_at": user_created_at},
+            {"session_id": session_id, "role": "JurixAI", "content": reply,    "created_at": ai_created_at}
         ]).execute()
+
+        # Update session activity timestamp on each message
+        supabase.table("sessions").update({
+            "updated_at": ai_created_at
+        }).eq("id", session_id).execute()
 
         return {
             "session_id": session_id,
