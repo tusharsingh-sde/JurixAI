@@ -9,3 +9,9 @@ __pycache__
 legal_data
 build_database.py
 query_db.py
+migrations
+*.md
+tests
+frontend
+apply_*.py
+test_*.py
