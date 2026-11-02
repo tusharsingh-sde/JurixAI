@@ -16,7 +16,7 @@
 
 **JurixAI** is a production-hardened, **RAG-based** (Retrieval-Augmented Generation) legal intelligence assistant purpose-built for the **Indian Legal System**. It goes beyond cold legal summaries — acting as a trusted *Legal Saathi* that understands distress and delivers authoritative, law-backed guidance with empathy and clarity.
 
-[Getting Started](#-getting-started) · [Architecture](#-architecture) · [API Reference](#-api-reference) · [Deployment Guide](DEPLOY.md) · [Contributing](#-contributing)
+[Getting Started](#-getting-started) · [Architecture](#-architecture) · [API Reference](#-api-reference) · [Docker Deployment](#-docker-deployment) · [Contributing](#-contributing)
 
 </div>
 
@@ -166,7 +166,6 @@ JurixAI_core/
 ├── migrations/
 │   └── 001_jurix.sql         # Idempotent Supabase PostgreSQL schema & RLS policies
 │
-├── DEPLOY.md                 # Production deployment & operations guide
 ├── .gitignore                # Comprehensive exclusions (secrets, venv, caches)
 └── README.md
 ```
@@ -250,8 +249,6 @@ docker build -t jurixai-backend ./backend
 # Run with environment variables
 docker run -p 8000:8000 --env-file backend/.env jurixai-backend
 ```
-
-For complete cloud deployment guidance (Cloud Run, Railway, Render, proxy CIDRs, and rollback steps), refer to [DEPLOY.md](DEPLOY.md).
 
 ---
 

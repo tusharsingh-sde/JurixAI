@@ -141,3 +141,5 @@ backend.zip
 *.swo
 *~
 context.txt
+
+DEPLOY.md
