@@ -23,7 +23,6 @@ import pytesseract
 import io
 import warnings
 import threading
-from collections import defaultdict
 from datetime import datetime, timezone, timedelta
 
 # =====================================================================
@@ -270,12 +269,20 @@ def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(securit
 MAX_VERBATIM = 10        # Last N messages sent as-is
 SUMMARY_BATCH_MIN = 10   # Only re-summarize when 10+ new old messages accumulate
 
-# Per-session lock for in-process concurrency safety
-_session_locks = defaultdict(threading.Lock)
+# Per-session lock for in-process concurrency safety (bounded cache prevents memory leaks)
+MAX_CACHED_SESSION_LOCKS = 1000
+_session_locks: dict[str, threading.Lock] = {}
 _session_locks_guard = threading.Lock()
 
 def _get_session_lock(session_id: str) -> threading.Lock:
     with _session_locks_guard:
+        if session_id not in _session_locks:
+            if len(_session_locks) >= MAX_CACHED_SESSION_LOCKS:
+                for sid, lock in list(_session_locks.items()):
+                    if not lock.locked():
+                        del _session_locks[sid]
+                        break
+            _session_locks[session_id] = threading.Lock()
         return _session_locks[session_id]
 
 def get_history_for_prompt(session_id: str) -> str:
