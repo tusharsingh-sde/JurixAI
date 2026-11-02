@@ -82,6 +82,7 @@ except ValueError:
     MAX_MESSAGE_CHARS = 4000
 
 CHROMA_DIR = os.getenv("CHROMA_DIR", "./Jurixai_db")
+FORWARDED_ALLOW_IPS = os.getenv("FORWARDED_ALLOW_IPS", "127.0.0.1")
 
 # Tesseract OCR path configuration
 # 1. Custom path via TESSERACT_PATH environment variable
@@ -122,6 +123,19 @@ async def lifespan(app: FastAPI):
     app.state.embeddings = embeddings
     app.state.db = db
     logger.info("Lifespan startup complete: Chroma loaded (collection count: %d)", db._collection.count())
+    logger.info(
+        "JurixAI started with settings: models=%s, allowed_origins_count=%d, max_upload_mb=%d, max_message_chars=%d, chroma_dir=%s",
+        GEMINI_MODELS, len(ALLOWED_ORIGINS), MAX_UPLOAD_MB, MAX_MESSAGE_CHARS, CHROMA_DIR
+    )
+    port_env = os.getenv("PORT")
+    if port_env and FORWARDED_ALLOW_IPS == "127.0.0.1":
+        logger.warning(
+            "⚠️ SECURITY / RATE-LIMIT WARNING: PORT environment variable is set (%s), but "
+            "FORWARDED_ALLOW_IPS is using default '127.0.0.1'. If running behind a reverse proxy "
+            "(Cloud Run, Railway, Render, etc.), client IP resolution will fail and all users "
+            "will share a single rate-limit bucket! Set FORWARDED_ALLOW_IPS to the proxy IP/CIDR (or '*' if proxy ingress is isolated).",
+            port_env
+        )
     yield
     logger.info("Lifespan shutdown: JurixAI backend stopped.")
 

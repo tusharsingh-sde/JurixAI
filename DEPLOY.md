@@ -10,20 +10,20 @@ This guide details the step-by-step production deployment process for the JurixA
   - Container baseline consumption: ~750 MB to 850 MB.
   - Sentence-transformers embedding model (`all-MiniLM-L6-v2`) in-memory: ~350 MB.
   - ChromaDB vector store index: ~120 MB.
-  - Fast-API & Uvicorn baseline: ~80 MB.
+  - FastAPI & Uvicorn baseline: ~80 MB.
   - Single-worker design (`--workers 1`) bounds total process memory under 900 MB.
 - **Compute (CPU)**: **$\ge$ 1 vCPU** (2 vCPUs recommended for concurrent requests and OCR processing).
 - **Disk Storage**: ~1.2 GB container image.
 
 ---
 
-## 2. Vector Database (`Jurixai_db`) & Repository Sizing
+## 2. Vector Database (`backend/Jurixai_db`) & Repository Tracking
 
 - **Disk Footprint**: The `backend/Jurixai_db` directory occupies **~24.3 MB** total on disk (the largest single file is `chroma.sqlite3` at **20.46 MB**).
-- **GitHub Limit Compliance**: Well within GitHub's 100 MB hard file limit (and below GitHub's 50 MB soft warning threshold). It is safely tracked directly in Git and baked into the Docker image at build time via `COPY`.
+- **GitHub Limit Compliance**: Well within GitHub's 100 MB hard file limit (and below GitHub's 50 MB soft warning threshold). It is tracked directly in Git and baked into the Docker image at build time via `COPY Jurixai_db ./Jurixai_db`.
 - **ChromaDB Version**: Pinned to `chromadb==1.5.7`.
   > [!IMPORTANT]
-  > The database was constructed and indexed with ChromaDB 1.5.x. If the ChromaDB version is ever upgraded, rebuild the vector store using `build_database.py`.
+  > The database was constructed and indexed with ChromaDB 1.5.x. If the ChromaDB version is ever upgraded, rebuild the vector store using `build_database.py` with `backend/requirements-dev.txt`.
 
 ---
 
@@ -44,9 +44,23 @@ Configure these variables in your production environment / platform dashboard (e
 | `MAX_MESSAGE_CHARS` | No | `4000` | Maximum character length for chat input messages. |
 | `PORT` | No | `8000` | Port on which the container listens. |
 
+> [!WARNING]
+> **REVERSE PROXY RATE LIMITING WARNING**:
+> If the `PORT` environment variable is set (typical in cloud platform environments like Cloud Run, Render, or Railway) and `FORWARDED_ALLOW_IPS` is left at the default `127.0.0.1`, Uvicorn will discard the client IP headers and use the platform proxy IP. As a result, **all users will share a single rate-limit bucket**! Set `FORWARDED_ALLOW_IPS` to your proxy's IP/subnet (or `*` if the container runs behind an isolated platform ingress).
+
 ---
 
-## 4. Deployment Order of Operations
+## 4. Development & Vector Database Build Dependencies
+
+For local vector database maintenance, ingestion, and testing, use [`backend/requirements-dev.txt`](file:///c:/Users/tstus/Desktop/Projects/JurixAI_core/backend/requirements-dev.txt):
+```bash
+pip install -r backend/requirements-dev.txt
+```
+This includes `langchain-community`, `langchain-text-splitters`, `pypdf`, and `pytest`.
+
+---
+
+## 5. Deployment Order of Operations
 
 Follow this strict 5-step sequence to ensure zero-downtime deployment:
 
@@ -69,17 +83,17 @@ In your Supabase Dashboard:
 Set all mandatory environment variables listed in Section 3 in your hosting platform.
 
 ### Step 4: Build and Deploy Container
-Build and push the Docker image:
+Build the container using `backend/` as the build context:
 
 ```bash
-# Build the Docker image from root
-docker build -t jurixai-backend:latest .
+# Build Docker image from backend directory
+docker build -t jurixai-backend:latest ./backend
 
 # Run the container locally or on your server
 docker run -d \
   --name jurixai-app \
   -p 8000:8000 \
-  --env-file .env \
+  --env-file backend/.env \
   jurixai-backend:latest
 ```
 
@@ -122,7 +136,7 @@ docker run -d \
 
 ---
 
-## 5. Rollback Plan
+## 6. Rollback Plan
 
 If you must revert the release:
 1. Re-deploy the previous container tag.

@@ -1,0 +1,11 @@
+# ===================================================
+# JurixAI Backend — Development & Build Dependencies
+# ===================================================
+# Used for build_database.py, query_db.py, and running backend tests
+
+-r requirements.txt
+
+langchain-community==0.4.1
+langchain-text-splitters==1.1.1
+pypdf==6.21.4
+pytest==9.2.0

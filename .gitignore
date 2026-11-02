@@ -68,10 +68,12 @@ htmlcov/
 .ruff_cache/
 
 # ChromaDB / Vector Store Data
-Jurixai_db/
-**/Jurixai_db/
-chroma.sqlite3
-*.sqlite3
+# Ignore root empty stub directory
+/Jurixai_db/
+/chroma.sqlite3
+# Explicitly track production vector database in backend/
+!backend/Jurixai_db/
+!backend/Jurixai_db/**
 
 # Node.js / Frontend dependencies & caches
 node_modules/
