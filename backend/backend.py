@@ -446,31 +446,120 @@ def delete_session(session_id: str, user=Depends(get_current_user)):
 
 # DOCUMENT UPLOAD ENDPOINT
 
+# Configure PIL safe limits to prevent decompression bomb denial-of-service
+Image.MAX_IMAGE_PIXELS = 10_000_000
+MAX_IMAGE_DIMENSION = 2000
+
 def extract_document_text_sync(filename: str, content: bytes) -> str:
     extracted_text = ""
-    if filename.lower().endswith(".pdf"):
-        with pdfplumber.open(io.BytesIO(content)) as pdf:
-            for page in pdf.pages:
-                page_text = page.extract_text()
-                if page_text:
-                    extracted_text += page_text + "\n"
-    elif filename.lower().endswith((".png", ".jpg", ".jpeg")):
-        image = Image.open(io.BytesIO(content))
-        extracted_text = pytesseract.image_to_string(image)
-    else:
-        raise HTTPException(status_code=400, detail="Only PDF and image files (JPG/PNG/JPEG) are allowed.")
-    return " ".join(extracted_text.split())
+    lower_name = filename.lower()
+
+    if lower_name.endswith(".pdf"):
+        try:
+            with pdfplumber.open(io.BytesIO(content)) as pdf:
+                # Cap processing to the first 30 pages to limit CPU and RAM consumption
+                for page in pdf.pages[:30]:
+                    page_text = page.extract_text()
+                    if page_text:
+                        extracted_text += page_text + "\n"
+        except Exception as pdf_err:
+            logger.warning("pdfplumber failed extracting text: %s", pdf_err)
+            raise HTTPException(status_code=422, detail="Unable to parse PDF document.")
+
+    elif lower_name.endswith((".png", ".jpg", ".jpeg")):
+        try:
+            image = Image.open(io.BytesIO(content))
+            # Downscale oversized images before OCR to bound memory and CPU usage
+            if image.width > MAX_IMAGE_DIMENSION or image.height > MAX_IMAGE_DIMENSION:
+                image.thumbnail((MAX_IMAGE_DIMENSION, MAX_IMAGE_DIMENSION), Image.Resampling.LANCZOS)
+
+            if image.mode not in ("L", "RGB"):
+                image = image.convert("RGB")
+
+            extracted_text = pytesseract.image_to_string(image)
+        except Image.DecompressionBombError:
+            logger.warning("Decompression bomb detected in uploaded image.")
+            raise HTTPException(status_code=422, detail="Image exceeds maximum dimensions (decompression bomb protection).")
+        except Exception as ocr_err:
+            logger.warning("pytesseract failed during image OCR: %s", ocr_err)
+            raise HTTPException(status_code=422, detail="Unable to process image content.")
+
+    cleaned_text = " ".join(extracted_text.split())
+    if not cleaned_text:
+        raise HTTPException(
+            status_code=422,
+            detail="No readable text could be extracted from the document."
+        )
+    return cleaned_text
 
 @app.post("/upload")
 @limiter.limit("10/minute", key_func=get_user_or_ip_identifier)
 async def process_document(request: Request, file: UploadFile = File(...), user=Depends(get_current_user)):
-    """Upload a PDF or image document and extract its text content."""
+    """Upload a PDF or image document and extract its text content safely."""
     try:
-        content = await file.read()
-        cleaned_text = await run_in_threadpool(extract_document_text_sync, file.filename, content)
+        max_upload_bytes = MAX_UPLOAD_MB * 1024 * 1024
+
+        # 1. Fast pre-check on Content-Length header
+        content_length = request.headers.get("content-length")
+        if content_length:
+            try:
+                if int(content_length) > max_upload_bytes:
+                    raise HTTPException(
+                        status_code=413,
+                        detail=f"File exceeds maximum allowed upload size of {MAX_UPLOAD_MB}MB."
+                    )
+            except ValueError:
+                pass
+
+        # 2. Chunked streaming read with immediate abort to prevent memory bloat
+        chunk_size = 64 * 1024  # 64 KB
+        buffer = bytearray()
+        total_read = 0
+
+        while True:
+            chunk = await file.read(chunk_size)
+            if not chunk:
+                break
+            total_read += len(chunk)
+            if total_read > max_upload_bytes:
+                raise HTTPException(
+                    status_code=413,
+                    detail=f"File exceeds maximum allowed upload size of {MAX_UPLOAD_MB}MB."
+                )
+            buffer.extend(chunk)
+
+        content = bytes(buffer)
+        if len(content) == 0:
+            raise HTTPException(status_code=422, detail="Uploaded file is empty.")
+
+        filename = (file.filename or "").strip()
+        lower_name = filename.lower()
+        allowed_exts = (".pdf", ".png", ".jpg", ".jpeg")
+
+        if not any(lower_name.endswith(ext) for ext in allowed_exts):
+            raise HTTPException(
+                status_code=400,
+                detail="Only PDF and image files (JPG/PNG/JPEG) are allowed."
+            )
+
+        # 3. Magic bytes & image header verification
+        if lower_name.endswith(".pdf"):
+            if not content.startswith(b"%PDF"):
+                raise HTTPException(status_code=422, detail="Invalid PDF file: Missing %PDF header.")
+        elif lower_name.endswith((".png", ".jpg", ".jpeg")):
+            try:
+                test_img = Image.open(io.BytesIO(content))
+                test_img.verify()
+            except Exception as img_err:
+                logger.warning("Uploaded image failed verification: %s", img_err)
+                raise HTTPException(status_code=422, detail="Invalid or corrupt image file.")
+
+        # 4. Offload heavy parsing to threadpool
+        cleaned_text = await run_in_threadpool(extract_document_text_sync, filename, content)
+
         return {
             "status": "success",
-            "filename": file.filename,
+            "filename": filename,
             "extracted_text": cleaned_text
         }
     except HTTPException:
