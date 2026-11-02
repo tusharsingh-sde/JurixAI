@@ -123,7 +123,7 @@ function App() {
     } catch (e) { setError(e.message) }
   }
 
-  async function sendMessage(text = draft) {
+  async function sendMessage(text = draft, documentText = null) {
     const content = text.trim()
     if (!content || busy) return
     if (!token) {
@@ -137,9 +137,11 @@ function App() {
     setMessages((current) => [...current, userMessage])
     setBusy(true)
     try {
+      const payload = { session_id: activeSession?.id || null, message: content }
+      if (documentText) payload.document_text = documentText
       const data = await request('/chat', {
         method: 'POST', token,
-        body: JSON.stringify({ session_id: activeSession?.id || null, message: content }),
+        body: JSON.stringify(payload),
       })
       setMessages((current) => [...current, { id: crypto.randomUUID(), role: 'assistant', content: data.reply }])
       let session = activeSession
@@ -163,7 +165,7 @@ function App() {
       const data = await request('/upload', { method: 'POST', token, body: formData })
       if (!data.extracted_text?.trim()) throw new Error('No readable text was found. Try a clearer scan or image.')
       setPendingFile(null)
-      await sendMessage(`Please review this uploaded ${file.name} and explain the important details, risks, deadlines, and what I should do next.\n\nDOCUMENT TEXT:\n${data.extracted_text}`)
+      await sendMessage(`Please review this uploaded ${file.name} and explain the important details, risks, deadlines, and what I should do next.`, data.extracted_text)
     } catch (e) { setError(e.message); setPendingFile(null) }
     finally { setUploading(false); if (fileRef.current) fileRef.current.value = '' }
   }
