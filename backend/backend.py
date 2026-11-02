@@ -1,5 +1,6 @@
 import os
 import uuid
+import logging
 from typing import Optional
 from dotenv import load_dotenv
 from fastapi import FastAPI, UploadFile, File, HTTPException, Depends
@@ -19,6 +20,9 @@ import io
 # Settings & Configuration
 # =====================================================================
 load_dotenv()
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+logger = logging.getLogger("jurixai")
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
 SUPABASE_URL = os.getenv("SUPABASE_URL")
@@ -95,12 +99,14 @@ supabase: Client = create_client(supabase_url, supabase_key)
 app = FastAPI(title="JurixAI Backend", description="Elite Legal RAG Engine")
 
 
-#CORS Middleware
+# CORS Middleware
+has_wildcard_origin = "*" in ALLOWED_ORIGINS
+allow_credentials = not has_wildcard_origin
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
+    allow_origins=ALLOWED_ORIGINS,
+    allow_credentials=allow_credentials,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -113,17 +119,19 @@ embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
 db = Chroma(persist_directory=CHROMA_DIR, embedding_function=embeddings)
 def invoke_gemini(prompt: str) -> str:
     """Invokes Gemini with automatic model fallback to prevent 503 high demand errors."""
-    models = ["gemini-3.5-flash", "gemini-3.5-flash-lite", "gemini-3.7-flash"]
+    models = GEMINI_MODELS
     last_err = None
     for model_name in models:
         try:
             model = ChatGoogleGenerativeAI(model=model_name, max_retries=2)
             res = model.invoke(prompt)
+            logger.info("Gemini invocation succeeded with model '%s'", model_name)
             if isinstance(res.content, list):
                 return "".join(p.get("text", "") if isinstance(p, dict) else str(p) for p in res.content)
             return str(res.content)
         except Exception as e:
-            print(f"Model {model_name} failed: {e}. Trying fallback model...")
+            last_err = e
+            logger.warning("Gemini model '%s' failed: %s. Trying fallback model...", model_name, e)
     if last_err:
         raise last_err
     raise RuntimeError("All Gemini models failed to respond.")
@@ -193,6 +201,24 @@ Preserve: the user's legal situation, key laws or sections mentioned, and any ad
 
 
 # API & AUTH ENDPOINTS
+
+# =====================================================================
+# Health & Readiness Probes
+# =====================================================================
+@app.get("/health")
+def health_check():
+    """Liveness probe: returns 200 OK without database or authentication overhead."""
+    return {"status": "ok"}
+
+
+@app.get("/ready")
+def readiness_check():
+    """Readiness probe: verifies that Chroma vector store is loaded and ready."""
+    current_db = getattr(app.state, "db", None) or db
+    if current_db is None:
+        raise HTTPException(status_code=503, detail="Vector store not initialized")
+    return {"status": "ready"}
+
 
 @app.post("/signup")
 async def signup(request: AuthRequest):
