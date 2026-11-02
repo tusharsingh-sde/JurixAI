@@ -78,6 +78,9 @@ htmlcov/
 # Local model cache — large binary weights, not needed in git (Docker COPY handles it)
 backend/local_model_cache/
 
+# Frontend directory (managed separately / excluded from repository)
+frontend/
+
 # Node.js / Frontend dependencies & caches
 node_modules/
 **/node_modules/
