@@ -1,10 +1,36 @@
 import { useEffect, useRef, useState } from 'react'
 import {
-  Check, FileText, LoaderCircle, LogOut, Menu,
+  Check, FileText, LoaderCircle, LogOut, Mail, Menu,
   MessageCircle, Plus, Scale, ShieldCheck, Sparkles, Trash2, X,
 } from 'lucide-react'
+import { supabase } from './lib/supabase'
 
 const API_URL = (import.meta.env.VITE_API_URL || 'http://localhost:8000').replace(/\/$/, '')
+
+const HERO_TAGS = [
+  'BNS · BNSS · IPC',
+  'OCR Notice & PDF Review',
+  'Hinglish & English',
+]
+
+const QUICK_PROMPTS = [
+  {
+    label: 'Check FIR rights under BNSS',
+    prompt: 'What are my legal rights when filing an FIR or Zero FIR under BNSS in India?',
+  },
+  {
+    label: 'Tenant deposit dispute',
+    prompt: 'My landlord is refusing to return my security deposit after vacating. What legal steps can I take in India?',
+  },
+  {
+    label: 'IPC to BNS lookup',
+    prompt: 'Explain the key changes from IPC Section 420 (cheating) to the corresponding section in BNS.',
+  },
+  {
+    label: 'Review a legal notice',
+    prompt: 'I received a legal notice. What are the key things I should check and how many days do I have to reply?',
+  },
+]
 
 async function request(path, { token, ...options } = {}) {
   const headers = new Headers(options.headers || {})
@@ -27,12 +53,11 @@ async function request(path, { token, ...options } = {}) {
 }
 
 function App() {
-  const [token, setToken] = useState(() => localStorage.getItem('jurixai_token'))
+  const [session, setSession] = useState(null)
+  const [authReady, setAuthReady] = useState(false)
   const [authOpen, setAuthOpen] = useState(false)
-  const [pendingPrompt, setPendingPrompt] = useState('')
-  const [pendingUpload, setPendingUpload] = useState(false)
-  const [email, setEmail] = useState(() => localStorage.getItem('jurixai_email') || '')
-  const [authMode, setAuthMode] = useState('login')
+  const [authMode, setAuthMode] = useState('login') // 'login' | 'signup' | 'magic'
+  const [oauthBusy, setOauthBusy] = useState('') // 'google' | 'github' | ''
   const [sessions, setSessions] = useState([])
   const [activeSession, setActiveSession] = useState(null)
   const [messages, setMessages] = useState([])
@@ -48,6 +73,16 @@ function App() {
   const [listening, setListening] = useState(false)
   const [uploading, setUploading] = useState(false)
 
+  const token = session?.access_token || null
+  const email = session?.user?.email || ''
+  const displayName =
+    session?.user?.user_metadata?.full_name ||
+    session?.user?.user_metadata?.user_name ||
+    email.split('@')[0] ||
+    'User'
+  const avatarUrl = session?.user?.user_metadata?.avatar_url || ''
+  const authProvider = session?.user?.app_metadata?.provider || 'email'
+
   const endRef = useRef(null)
   const inputRef = useRef(null)
   const fileRef = useRef(null)
@@ -56,18 +91,45 @@ function App() {
     endRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [messages, busy])
 
+  // Sync Supabase session + handle OAuth redirect return
   useEffect(() => {
-    if (token) loadSessions()
-  }, [token])
+    let mounted = true
 
+    supabase.auth.getSession().then(({ data: { session: current } }) => {
+      if (!mounted) return
+      setSession(current)
+      setAuthReady(true)
+    })
+
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, nextSession) => {
+      setSession(nextSession)
+      if (nextSession) {
+        setAuthOpen(false)
+        setOauthBusy('')
+        setError('')
+      }
+    })
+
+    return () => {
+      mounted = false
+      subscription.unsubscribe()
+    }
+  }, [])
+
+  // Load sessions & flush pending prompt/upload once logged in
   useEffect(() => {
-    if (token && pendingPrompt) {
-      const prompt = pendingPrompt
-      setPendingPrompt('')
-      sendMessage(prompt)
-    } else if (token && pendingUpload) {
-      setPendingUpload(false)
-      setTimeout(() => fileRef.current?.click(), 120)
+    if (!token) return
+    loadSessions(token)
+
+    const savedPrompt = sessionStorage.getItem('jurixai_pending_prompt')
+    const savedUpload = sessionStorage.getItem('jurixai_pending_upload')
+
+    if (savedPrompt) {
+      sessionStorage.removeItem('jurixai_pending_prompt')
+      sendMessage(savedPrompt, token)
+    } else if (savedUpload) {
+      sessionStorage.removeItem('jurixai_pending_upload')
+      setTimeout(() => fileRef.current?.click(), 180)
     }
   }, [token])
 
@@ -83,9 +145,10 @@ function App() {
     return () => window.removeEventListener('keydown', onKeyDown)
   }, [token])
 
-  async function loadSessions() {
+  async function loadSessions(activeToken = token) {
+    if (!activeToken) return
     try {
-      const data = await request('/sessions', { token })
+      const data = await request('/sessions', { token: activeToken })
       setSessions(data.sessions || [])
     } catch (e) {
       setError(e.message)
@@ -122,23 +185,42 @@ function App() {
   async function authenticate(event) {
     event.preventDefault()
     setError('')
+    setNotice('')
     setAuthBusy(true)
+    const cleanEmail = authEmail.trim()
+
     try {
-      const data = await request(authMode === 'login' ? '/login' : '/signup', {
-        method: 'POST',
-        body: JSON.stringify({ email: authEmail.trim(), password: authPassword }),
-      })
-      if (authMode === 'signup') {
-        setNotice('Your account is ready. Sign in to start a conversation.')
-        setAuthMode('login')
-      } else {
-        localStorage.setItem('jurixai_token', data.access_token)
-        localStorage.setItem('jurixai_email', data.email || authEmail.trim())
-        setEmail(data.email || authEmail.trim())
-        setToken(data.access_token)
-        setAuthOpen(false)
-        setAuthPassword('')
+      if (authMode === 'magic') {
+        const { error: otpError } = await supabase.auth.signInWithOtp({
+          email: cleanEmail,
+          options: { emailRedirectTo: window.location.origin },
+        })
+        if (otpError) throw otpError
+        setNotice(`Sign-in link sent to ${cleanEmail}. Check your inbox.`)
+        return
       }
+
+      if (authMode === 'signup') {
+        const { data, error: signUpError } = await supabase.auth.signUp({
+          email: cleanEmail,
+          password: authPassword,
+          options: { emailRedirectTo: window.location.origin },
+        })
+        if (signUpError) throw signUpError
+        if (!data.session) {
+          setNotice('Account created! Verify your email from your inbox, then sign in.')
+          setAuthMode('login')
+        }
+        setAuthPassword('')
+        return
+      }
+
+      const { error: signInError } = await supabase.auth.signInWithPassword({
+        email: cleanEmail,
+        password: authPassword,
+      })
+      if (signInError) throw signInError
+      setAuthPassword('')
     } catch (e) {
       setError(e.message)
     } finally {
@@ -146,12 +228,32 @@ function App() {
     }
   }
 
+  async function signInWithProvider(provider) {
+    setError('')
+    setNotice('')
+    setOauthBusy(provider)
+    try {
+      const { error: oauthError } = await supabase.auth.signInWithOAuth({
+        provider,
+        options: {
+          redirectTo: window.location.origin,
+          queryParams: provider === 'google' ? { prompt: 'select_account' } : undefined,
+        },
+      })
+      if (oauthError) throw oauthError
+    } catch (e) {
+      setError(e.message)
+      setOauthBusy('')
+    }
+  }
+
   async function signOut() {
-    try { await request('/logout', { method: 'POST', token }) } catch { /* ignore */ }
-    localStorage.removeItem('jurixai_token')
-    localStorage.removeItem('jurixai_email')
-    setToken(null)
-    setEmail('')
+    try {
+      await supabase.auth.signOut()
+    } catch { /* ignore */ }
+    sessionStorage.removeItem('jurixai_pending_prompt')
+    sessionStorage.removeItem('jurixai_pending_upload')
+    setSession(null)
     setSessions([])
     setActiveSession(null)
     setMessages([])
@@ -168,12 +270,12 @@ function App() {
     }
   }
 
-  async function sendMessage(text = draft, documentText = null) {
+  async function sendMessage(text = draft, activeToken = token, documentText = null) {
     const content = text.trim()
     if (!content || busy) return
-    if (!token) {
+    if (!activeToken) {
       setDraft(content)
-      setPendingPrompt(content)
+      sessionStorage.setItem('jurixai_pending_prompt', content)
       setAuthOpen(true)
       return
     }
@@ -194,7 +296,7 @@ function App() {
       }
       const data = await request('/chat', {
         method: 'POST',
-        token,
+        token: activeToken,
         body: JSON.stringify(payload),
       })
       setMessages((current) => [...current, { id: crypto.randomUUID(), role: 'assistant', content: data.reply }])
@@ -204,7 +306,7 @@ function App() {
           title: content.length > 50 ? `${content.slice(0, 50)}...` : content,
         })
       }
-      await loadSessions()
+      await loadSessions(activeToken)
     } catch (e) {
       setError(e.message)
       setMessages((current) => current.filter((m) => m.id !== userMessage.id))
@@ -230,6 +332,7 @@ function App() {
       setPendingFile(null)
       await sendMessage(
         `Please review this uploaded ${file.name} and explain the important details, risks, deadlines, and what I should do next.`,
+        token,
         data.extracted_text
       )
     } catch (e) {
@@ -263,16 +366,24 @@ function App() {
     recognition.start()
   }
 
+  if (!authReady) {
+    return (
+      <main className="cobalt-shell">
+        <LoaderCircle className="spin" size={28} />
+      </main>
+    )
+  }
+
   if (!token && !authOpen) {
     return (
       <HeroLanding
         onAsk={(prompt) => {
           setDraft(prompt)
-          setPendingPrompt(prompt)
+          sessionStorage.setItem('jurixai_pending_prompt', prompt)
           setAuthOpen(true)
         }}
         onUpload={() => {
-          setPendingUpload(true)
+          sessionStorage.setItem('jurixai_pending_upload', '1')
           setAuthOpen(true)
         }}
         onSignIn={() => setAuthOpen(true)}
@@ -286,13 +397,15 @@ function App() {
     return (
       <AuthScreen
         authMode={authMode}
-        setAuthMode={setAuthMode}
+        setAuthMode={(mode) => { setAuthMode(mode); setError(''); setNotice('') }}
         authEmail={authEmail}
         setAuthEmail={setAuthEmail}
         authPassword={authPassword}
         setAuthPassword={setAuthPassword}
         authenticate={authenticate}
+        onOAuth={signInWithProvider}
         authBusy={authBusy}
+        oauthBusy={oauthBusy}
         error={error}
         notice={notice}
         onBack={() => { setAuthOpen(false); setError(''); setNotice('') }}
@@ -361,10 +474,16 @@ function App() {
             <span>Private & securely saved</span>
           </div>
           <div className="profile-row">
-            <div className="avatar">{email.charAt(0).toUpperCase() || 'J'}</div>
+            <div className="avatar">
+              {avatarUrl ? (
+                <img src={avatarUrl} alt={displayName} className="avatar-img" referrerPolicy="no-referrer" />
+              ) : (
+                displayName.charAt(0).toUpperCase()
+              )}
+            </div>
             <div className="profile-info">
-              <strong>{email.split('@')[0]}</strong>
-              <span>Free account</span>
+              <strong>{displayName}</strong>
+              <span>{authProvider === 'email' ? 'Email account' : `Signed in via ${authProvider}`}</span>
             </div>
             <button className="icon-btn" onClick={signOut} aria-label="Sign out" title="Sign out">
               <LogOut size={16} />
@@ -403,12 +522,20 @@ function App() {
         />
 
         {!inChat ? (
-          <div className="hero-stage">
+          <div className="hero-stage hero-stage-authed">
             <div className="hero-content">
               <JurixLogo />
               <h1 className="hero-headline">
                 ELITE INDIAN<br />LEGAL<br />INTELLIGENCE
               </h1>
+              <p className="hero-tagline">
+                Instant, statute-grounded clarity for Indian law — analyze legal notices, FIRs, contracts, and everyday rights in seconds.
+              </p>
+              <div className="hero-tags">
+                {HERO_TAGS.map((tag) => (
+                  <span key={tag} className="hero-tag">{tag}</span>
+                ))}
+              </div>
             </div>
 
             <img
@@ -417,28 +544,50 @@ function App() {
               alt="Blue-lit Lady Justice holding balanced scales"
             />
 
-            <div className="hero-composer-wrap">
-              <StatusBanners
-                error={error}
-                notice={notice}
-                pendingFile={pendingFile}
-                uploading={uploading}
-                onClearError={() => setError('')}
-                onClearNotice={() => setNotice('')}
-                onClearFile={() => { setPendingFile(null); setUploading(false) }}
-              />
-              <GlassPillForm
-                inputRef={inputRef}
-                value={draft}
-                onChange={setDraft}
-                onSubmit={() => sendMessage()}
-                onAttach={() => fileRef.current?.click()}
-                onVoice={() => startVoiceInput((t) => setDraft((c) => `${c}${c ? ' ' : ''}${t}`))}
-                listening={listening}
-                busy={busy}
-                uploading={uploading}
-                placeholder="Ask anything about Indian law..."
-              />
+            <div className="hero-bottom">
+              <div className="hero-composer-wrap">
+                <StatusBanners
+                  error={error}
+                  notice={notice}
+                  pendingFile={pendingFile}
+                  uploading={uploading}
+                  onClearError={() => setError('')}
+                  onClearNotice={() => setNotice('')}
+                  onClearFile={() => { setPendingFile(null); setUploading(false) }}
+                />
+                <GlassPillForm
+                  inputRef={inputRef}
+                  value={draft}
+                  onChange={setDraft}
+                  onSubmit={() => sendMessage()}
+                  onAttach={() => fileRef.current?.click()}
+                  onVoice={() => startVoiceInput((t) => setDraft((c) => `${c}${c ? ' ' : ''}${t}`))}
+                  listening={listening}
+                  busy={busy}
+                  uploading={uploading}
+                  placeholder="Ask anything about Indian law..."
+                />
+                <div className="prompt-chips">
+                  {QUICK_PROMPTS.map((item) => (
+                    <button
+                      key={item.label}
+                      type="button"
+                      className="prompt-chip"
+                      onClick={() => sendMessage(item.prompt)}
+                    >
+                      <Sparkles size={12} />
+                      <span>{item.label}</span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+              <div className="hero-micro-footer">
+                <span>Grounded in Indian Statutes</span>
+                <span>·</span>
+                <span>Private Sessions</span>
+                <span>·</span>
+                <span>For formal court filings, consult an advocate</span>
+              </div>
             </div>
           </div>
         ) : (
@@ -587,6 +736,14 @@ function HeroLanding({ onAsk, onUpload, onSignIn, listening, startVoiceInput }) 
           <h1 className="hero-headline">
             ELITE INDIAN<br />LEGAL<br />INTELLIGENCE
           </h1>
+          <p className="hero-tagline">
+            Instant, statute-grounded clarity for Indian law — analyze legal notices, FIRs, contracts, and everyday rights in seconds.
+          </p>
+          <div className="hero-tags">
+            {HERO_TAGS.map((tag) => (
+              <span key={tag} className="hero-tag">{tag}</span>
+            ))}
+          </div>
         </div>
 
         <img
@@ -595,18 +752,40 @@ function HeroLanding({ onAsk, onUpload, onSignIn, listening, startVoiceInput }) 
           alt="Blue-lit Lady Justice holding balanced scales"
         />
 
-        <div className="hero-composer-wrap">
-          <GlassPillForm
-            value={query}
-            onChange={setQuery}
-            onSubmit={() => onAsk(query.trim() || 'I have a legal question')}
-            onAttach={onUpload}
-            onVoice={() => startVoiceInput((t) => setQuery((c) => `${c}${c ? ' ' : ''}${t}`))}
-            listening={listening}
-            busy={false}
-            uploading={false}
-            placeholder="Ask a legal question..."
-          />
+        <div className="hero-bottom">
+          <div className="hero-composer-wrap">
+            <GlassPillForm
+              value={query}
+              onChange={setQuery}
+              onSubmit={() => onAsk(query.trim() || 'I have a legal question')}
+              onAttach={onUpload}
+              onVoice={() => startVoiceInput((t) => setQuery((c) => `${c}${c ? ' ' : ''}${t}`))}
+              listening={listening}
+              busy={false}
+              uploading={false}
+              placeholder="Ask a legal question..."
+            />
+            <div className="prompt-chips">
+              {QUICK_PROMPTS.map((item) => (
+                <button
+                  key={item.label}
+                  type="button"
+                  className="prompt-chip"
+                  onClick={() => onAsk(item.prompt)}
+                >
+                  <Sparkles size={12} />
+                  <span>{item.label}</span>
+                </button>
+              ))}
+            </div>
+          </div>
+          <div className="hero-micro-footer">
+            <span>Grounded in Indian Statutes</span>
+            <span>·</span>
+            <span>OCR Document Analysis</span>
+            <span>·</span>
+            <span>Private & Encrypted Sessions</span>
+          </div>
         </div>
       </div>
     </main>
@@ -615,8 +794,11 @@ function HeroLanding({ onAsk, onUpload, onSignIn, listening, startVoiceInput }) 
 
 function AuthScreen({
   authMode, setAuthMode, authEmail, setAuthEmail,
-  authPassword, setAuthPassword, authenticate, authBusy, error, notice, onBack,
+  authPassword, setAuthPassword, authenticate, onOAuth,
+  authBusy, oauthBusy, error, notice, onBack,
 }) {
+  const isBusy = authBusy || Boolean(oauthBusy)
+
   return (
     <main className="cobalt-shell landing-shell">
       <div className="hero-stage auth-stage">
@@ -632,11 +814,15 @@ function AuthScreen({
 
         <div className="auth-card">
           <div className="auth-kicker">SECURE ACCESS · JURIXAI</div>
-          <h2>{authMode === 'login' ? 'Welcome back.' : 'Create your account.'}</h2>
+          <h2>
+            {authMode === 'login' && 'Welcome back.'}
+            {authMode === 'signup' && 'Create your account.'}
+            {authMode === 'magic' && 'Passwordless sign in.'}
+          </h2>
           <p className="auth-desc">
-            {authMode === 'login'
-              ? 'Sign in to continue your private legal conversations.'
-              : 'Get law-grounded Indian legal assistance in seconds.'}
+            {authMode === 'magic'
+              ? 'We will email you a one-click sign-in link via Supabase.'
+              : 'Continue with your preferred account for private legal sessions.'}
           </p>
 
           {error && <div className="status-banner status-error"><span>{error}</span></div>}
@@ -645,6 +831,30 @@ function AuthScreen({
               <Check size={14} /><span>{notice}</span>
             </div>
           )}
+
+          <div className="oauth-grid">
+            <button
+              type="button"
+              className="oauth-btn"
+              onClick={() => onOAuth('google')}
+              disabled={isBusy}
+            >
+              {oauthBusy === 'google' ? <LoaderCircle className="spin" size={16} /> : <GoogleIcon />}
+              <span>Google</span>
+            </button>
+
+            <button
+              type="button"
+              className="oauth-btn"
+              onClick={() => onOAuth('github')}
+              disabled={isBusy}
+            >
+              {oauthBusy === 'github' ? <LoaderCircle className="spin" size={16} /> : <GitHubIcon />}
+              <span>GitHub</span>
+            </button>
+          </div>
+
+          <div className="auth-divider"><span>or continue with email</span></div>
 
           <form onSubmit={authenticate} className="auth-form">
             <label>
@@ -658,41 +868,81 @@ function AuthScreen({
                 required
               />
             </label>
-            <label>
-              Password
-              <input
-                type="password"
-                autoComplete={authMode === 'login' ? 'current-password' : 'new-password'}
-                placeholder={authMode === 'login' ? 'Your password' : 'At least 8 characters'}
-                value={authPassword}
-                onChange={(e) => setAuthPassword(e.target.value)}
-                minLength={authMode === 'signup' ? 8 : 1}
-                required
-              />
-            </label>
-            <button className="auth-submit-btn" type="submit" disabled={authBusy}>
-              {authBusy ? <LoaderCircle className="spin" size={18} /> : (
+
+            {authMode !== 'magic' && (
+              <label>
+                Password
+                <input
+                  type="password"
+                  autoComplete={authMode === 'login' ? 'current-password' : 'new-password'}
+                  placeholder="At least 6 characters"
+                  value={authPassword}
+                  onChange={(e) => setAuthPassword(e.target.value)}
+                  minLength={6}
+                  required
+                />
+              </label>
+            )}
+
+            <button className="auth-submit-btn" type="submit" disabled={isBusy}>
+              {authBusy ? (
+                <LoaderCircle className="spin" size={18} />
+              ) : (
                 <>
-                  <span>{authMode === 'login' ? 'Sign in' : 'Create account'}</span>
-                  <RightArrowIcon />
+                  <span>
+                    {authMode === 'login' && 'Sign in with Email'}
+                    {authMode === 'signup' && 'Create account'}
+                    {authMode === 'magic' && 'Send Magic Link'}
+                  </span>
+                  {authMode === 'magic' ? <Mail size={16} /> : <RightArrowIcon />}
                 </>
               )}
             </button>
           </form>
 
-          <p className="auth-switch">
-            {authMode === 'login' ? 'New to JurixAI?' : 'Already have an account?'}{' '}
-            <button type="button" onClick={() => setAuthMode(authMode === 'login' ? 'signup' : 'login')}>
-              {authMode === 'login' ? 'Create an account' : 'Sign in'}
+          <div className="auth-links-row">
+            <button
+              type="button"
+              className="auth-link-btn"
+              onClick={() => setAuthMode(authMode === 'magic' ? 'login' : 'magic')}
+            >
+              {authMode === 'magic' ? 'Use password instead' : 'Sign in with Magic Link'}
             </button>
-          </p>
+
+            <button
+              type="button"
+              className="auth-link-btn"
+              onClick={() => setAuthMode(authMode === 'signup' ? 'login' : 'signup')}
+            >
+              {authMode === 'signup' ? 'Already have an account?' : 'Create an account'}
+            </button>
+          </div>
 
           <div className="auth-assurance">
-            <ShieldCheck size={14} /> End-to-end private legal sessions
+            <ShieldCheck size={14} /> Powered by Supabase Auth · End-to-end private
           </div>
         </div>
       </div>
     </main>
+  )
+}
+
+function GoogleIcon() {
+  return (
+    <svg width="17" height="17" viewBox="0 0 24 24" aria-hidden="true">
+      <path fill="#EA4335" d="M12 5.04c1.62 0 3.07.56 4.21 1.64l3.15-3.15C17.45 1.77 14.97.8 12 .8 7.42.8 3.47 3.43 1.56 7.26l3.67 2.85C6.1 7.47 8.81 5.04 12 5.04z" />
+      <path fill="#4285F4" d="M23.49 12.27c0-.79-.07-1.55-.2-2.27H12v4.51h6.47c-.29 1.48-1.14 2.73-2.4 3.58l3.7 2.87c2.16-1.99 3.72-4.92 3.72-8.69z" />
+      <path fill="#FBBC05" d="M5.23 14.11a6.94 6.94 0 0 1 0-4.22L1.56 7.04a11.2 11.2 0 0 0 0 9.92l3.67-2.85z" />
+      <path fill="#34A853" d="M12 23.2c3.24 0 5.95-1.07 7.94-2.9l-3.7-2.87c-1.08.72-2.45 1.15-4.24 1.15-3.19 0-5.9-2.15-6.87-5.05l-3.67 2.85C3.47 20.57 7.42 23.2 12 23.2z" />
+    </svg>
+  )
+}
+
+function GitHubIcon() {
+  return (
+    <svg width="17" height="17" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+      <path d="M12 1.5C6.2 1.5 1.5 6.2 1.5 12c0 4.64 3.01 8.58 7.18 9.97.53.1.72-.23.72-.51v-1.8c-2.92.63-3.54-1.41-3.54-1.41-.48-1.21-1.17-1.54-1.17-1.54-.95-.65.07-.64.07-.64 1.06.07 1.61 1.09 1.61 1.09.94 1.61 2.46 1.14 3.06.87.09-.68.37-1.14.67-1.41-2.33-.27-4.78-1.17-4.78-5.19 0-1.15.41-2.08 1.08-2.82-.11-.27-.47-1.34.1-2.79 0 0 .88-.28 2.89 1.08a10.04 10.04 0 0 1 5.26 0c2-1.36 2.88-1.08 2.88-1.08.58 1.45.22 2.52.11 2.79.67.74 1.08 1.67 1.08 2.82 0 4.03-2.45 4.92-4.79 5.18.38.33.71.97.71 1.95v2.89c0 .28.19.61.73.51A10.51 10.51 0 0 0 22.5 12c0-5.8-4.7-10.5-10.5-10.5z" />
+    </svg>
   )
 }
 
