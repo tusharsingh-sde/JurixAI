@@ -9,9 +9,9 @@
 [![Docker](https://img.shields.io/badge/Docker-Ready-2496ED?style=for-the-badge&logo=docker&logoColor=white)](https://www.docker.com/)
 [![React](https://img.shields.io/badge/React-19-61DAFB?style=for-the-badge&logo=react&logoColor=black)](https://react.dev)
 [![LangChain](https://img.shields.io/badge/LangChain-Chroma-1C3C3C?style=for-the-badge&logo=langchain&logoColor=white)](https://langchain.com)
-[![Google Gemini](https://img.shields.io/badge/Google_Gemini-3.5_Flash-4285F4?style=for-the-badge&logo=google&logoColor=white)](https://ai.google.dev)
+[![Google Gemini](https://img.shields.io/badge/Google_Gemini-2.5_Flash-4285F4?style=for-the-badge&logo=google&logoColor=white)](https://ai.google.dev)
 [![Supabase](https://img.shields.io/badge/Supabase-Auth_%26_DB-3ECF8E?style=for-the-badge&logo=supabase&logoColor=white)](https://supabase.com)
-[![Pytest](https://img.shields.io/badge/Pytest-15_Passed-0A9EDC?style=for-the-badge&logo=pytest&logoColor=white)](https://docs.pytest.org)
+[![Pytest](https://img.shields.io/badge/Pytest-22_Passed-0A9EDC?style=for-the-badge&logo=pytest&logoColor=white)](https://docs.pytest.org)
 [![License](https://img.shields.io/badge/License-MIT-yellow?style=for-the-badge)](LICENSE)
 
 **JurixAI** is a production-hardened, **RAG-based** (Retrieval-Augmented Generation) legal intelligence assistant purpose-built for the **Indian Legal System**. It goes beyond cold legal summaries — acting as a trusted *Legal Saathi* that understands distress and delivers authoritative, law-backed guidance with empathy and clarity.
@@ -71,7 +71,7 @@ Indian law is vast, nuanced, and deeply intimidating for citizens and small busi
 │                                      ▼                                 │
 │                       ┌──────────────────────────────┐                │
 │                       │    Google Gemini API SDK     │                │
-│                       │  (gemini-3.5/3.7-flash with  │                │
+│                       │  (gemini-2.5-flash with      │                │
 │                       │   automatic multi-fallback)  │                │
 │                       └──────────────────────────────┘                │
 └────────────────────────────────────────────────────────────────────────┘
@@ -85,7 +85,7 @@ Indian law is vast, nuanced, and deeply intimidating for citizens and small busi
 | 2 | **Local Vectorization** | Chunks embedded using `all-MiniLM-L6-v2` and stored in persistent ChromaDB (`backend/Jurixai_db`) with 2,158 pre-indexed legal vectors. |
 | 3 | **Threadpool Retrieval** | Non-blocking `similarity_search` offloaded to `run_in_threadpool` to prevent event-loop starvation. |
 | 4 | **Context Augmentation** | Sanitized query tags (`<user_message>`, `<conversation_history>`, `<retrieved_context>`, `<uploaded_document>`) injected into the persona prompt with persistent document memory across follow-ups. |
-| 5 | **Resilient Generation** | Google Gemini SDK invocation wrapped in threadpools with an automated multi-model fallback cascade (`gemini-3.5-flash`, `gemini-3.5-flash-lite`, `gemini-3.7-flash`). |
+| 5 | **Resilient Generation** | Google Gemini SDK invocation wrapped in threadpools with an automated multi-model fallback cascade (`gemini-2.5-flash`, `gemini-2.5-flash-lite`, `gemini-2.0-flash`). |
 
 ---
 
@@ -283,7 +283,7 @@ docker run -p 8000:8000 --env-file backend/.env jurixai-backend
 - **`POST /upload`** (Limit: `10/minute/user`):
   - Enforces `MAX_UPLOAD_MB` (default 8MB) with early chunked 413 abort.
   - Verifies magic byte headers (`%PDF`, PNG, JPEG).
-  - Decompression bomb protection (50M pixel limit).
+  - Decompression bomb protection (25M pixel limit).
   - 30-page parsing cap.
   - Automatic OCR fallback via `pytesseract` for scanned non-text PDFs.
   - Returns `{"status": "success", "filename": "...", "extracted_text": "...", "truncated": false}`.
@@ -292,7 +292,7 @@ docker run -p 8000:8000 --env-file backend/.env jurixai-backend
 
 ## 🧪 Testing & Verification
 
-The backend includes a comprehensive pytest suite with 15 unit tests covering auth, upload security, rate limiting, and database operations with mocked services:
+The backend includes a comprehensive pytest suite with 22 unit tests covering auth, upload security, rate limiting, and database operations with mocked services:
 
 ```bash
 cd backend
@@ -305,7 +305,7 @@ tests/test_auth_and_abuse.py::test_short_password_rejected PASSED
 tests/test_data_layer.py::test_document_persistence_across_followups PASSED
 tests/test_upload_safety.py::test_magic_byte_validation PASSED
 ...
-====================== 15 passed in 7.08s ======================
+====================== 22 passed in 7.41s ======================
 ```
 
 ---

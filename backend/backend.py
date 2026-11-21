@@ -6,14 +6,14 @@ from dotenv import load_dotenv
 import re
 import hashlib
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, Request, UploadFile, File, HTTPException, Depends
+from fastapi import FastAPI, Request, UploadFile, File, HTTPException, Depends, Query
 from fastapi.concurrency import run_in_threadpool
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, field_validator
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
-from sentence_transformers import SentenceTransformer
+from slowapi.middleware import _find_route_handler
 from langchain_chroma import Chroma
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_google_genai import ChatGoogleGenerativeAI
@@ -24,6 +24,8 @@ import pytesseract
 import io
 import warnings
 import threading
+import time
+from collections import deque
 from datetime import datetime, timezone, timedelta
 
 # =====================================================================
@@ -69,7 +71,7 @@ ALLOWED_ORIGINS = [
     "http://127.0.0.1:3000",
 ]
 
-GEMINI_MODELS_RAW = os.getenv("GEMINI_MODELS", "gemini-3.5-flash,gemini-3.5-flash-lite,gemini-3.7-flash")
+GEMINI_MODELS_RAW = os.getenv("GEMINI_MODELS", "gemini-2.5-flash,gemini-2.5-flash-lite,gemini-2.0-flash")
 GEMINI_MODELS = [m.strip() for m in GEMINI_MODELS_RAW.split(",") if m.strip()]
 
 try:
@@ -104,40 +106,48 @@ elif os.name == "nt":
 
 # Supabase Clients:
 # 1. Admin client (service key): used for database queries and admin management
-# 2. Auth client (anon key): used strictly for sign_in_with_password to prevent admin session mutation
+# 2. Per-request anon client: factory for auth operations to prevent shared session mutation
 supabase_admin: Client = create_client(SUPABASE_URL, SUPABASE_SECRET_KEY)
-supabase_auth: Client = create_client(SUPABASE_URL, SUPABASE_ANON_KEY)
 supabase: Client = supabase_admin
 supabase_url = SUPABASE_URL
 supabase_key = SUPABASE_SECRET_KEY
 
+def _new_auth_client() -> Client:
+    """Create an isolated anon Supabase client per auth request to prevent shared session mutation."""
+    return create_client(SUPABASE_URL, SUPABASE_ANON_KEY)
+
 # Shared references (populated during application lifespan startup)
-model = None
 embeddings = None
 db = None
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global model, embeddings, db
+    global embeddings, db
     logger.info("Lifespan startup: Loading embedding model and Chroma DB...")
-    try:
-        model = SentenceTransformer('/app/local_model_cache/all-MiniLM-L6-v2')
-        embeddings = HuggingFaceEmbeddings(model_name='/app/local_model_cache/all-MiniLM-L6-v2')
-    except Exception as e:
-        logger.info("Container model path not found (%s), falling back to local model cache...", e)
-        local_model_path = os.path.join(BASE_DIR, "local_model_cache", "all-MiniLM-L6-v2")
-        model_path = local_model_path if os.path.exists(local_model_path) else "all-MiniLM-L6-v2"
-        model = SentenceTransformer(model_path)
-        embeddings = HuggingFaceEmbeddings(model_name=model_path)
 
+    container_model_path = "/app/local_model_cache/all-MiniLM-L6-v2"
+    local_model_path = os.path.join(BASE_DIR, "local_model_cache", "all-MiniLM-L6-v2")
+
+    if os.path.exists(container_model_path):
+        model_path = container_model_path
+    elif os.path.exists(local_model_path):
+        model_path = local_model_path
+    else:
+        model_path = "all-MiniLM-L6-v2"
+
+    embeddings = HuggingFaceEmbeddings(model_name=model_path)
     db = Chroma(persist_directory=CHROMA_DIR, embedding_function=embeddings)
-    app.state.model = model
+
     app.state.embeddings = embeddings
     app.state.db = db
-    logger.info("Lifespan startup complete: Chroma loaded (collection count: %d)", db._collection.count())
+    logger.info(
+        "Lifespan startup complete: model=%s, Chroma loaded (collection count: %d)",
+        model_path,
+        db._collection.count(),
+    )
     logger.info(
         "JurixAI started with settings: models=%s, allowed_origins_count=%d, max_upload_mb=%d, max_message_chars=%d, chroma_dir=%s",
-        GEMINI_MODELS, len(ALLOWED_ORIGINS), MAX_UPLOAD_MB, MAX_MESSAGE_CHARS, CHROMA_DIR
+        GEMINI_MODELS, len(ALLOWED_ORIGINS), MAX_UPLOAD_MB, MAX_MESSAGE_CHARS, CHROMA_DIR,
     )
     port_env = os.getenv("PORT")
     if port_env and FORWARDED_ALLOW_IPS == "127.0.0.1":
@@ -147,7 +157,7 @@ async def lifespan(app: FastAPI):
             "(Cloud Run, Railway, Render, etc.), client IP resolution will fail and all users "
             "will share a single rate-limit bucket! Set FORWARDED_ALLOW_IPS to the platform's proxy IPs/CIDR "
             "and always run the spoofed X-Forwarded-For signup test after deploy.",
-            port_env
+            port_env,
         )
     yield
     logger.info("Lifespan shutdown: JurixAI backend stopped.")
@@ -171,15 +181,43 @@ def get_real_ip(request: Request) -> str:
         return request.client.host
     return "127.0.0.1"
 
-def get_user_or_ip_identifier(request: Request) -> str:
-    """Identify client by SHA-256 hash of Bearer token if present, falling back to client IP."""
-    auth_header = request.headers.get("Authorization", "")
-    if auth_header.startswith("Bearer "):
-        token = auth_header[7:].strip()
-        if token:
-            token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
-            return f"user:{token_hash}"
-    return f"ip:{get_real_ip(request)}"
+# Per-verified-user sliding-window rate limiter (runs AFTER JWT verification)
+MAX_TRACKED_RATE_KEYS = 5000
+_user_rate_buckets: dict[str, deque[float]] = {}
+_user_rate_lock = threading.Lock()
+
+def enforce_user_rate_limit(user_id: str, scope: str, limit: int, window_seconds: int = 60) -> None:
+    """Enforce a thread-safe, bounded per-user rate limit keyed on verified Supabase user.id."""
+    now = time.monotonic()
+    cutoff = now - window_seconds
+    key = f"{scope}:{user_id}"
+
+    with _user_rate_lock:
+        bucket = _user_rate_buckets.get(key)
+        if bucket is None:
+            if len(_user_rate_buckets) >= MAX_TRACKED_RATE_KEYS:
+                # Evict stale buckets first; fallback to oldest entry
+                stale_keys = [
+                    k for k, dq in _user_rate_buckets.items()
+                    if not dq or dq[-1] <= cutoff
+                ]
+                for k in stale_keys:
+                    del _user_rate_buckets[k]
+                if len(_user_rate_buckets) >= MAX_TRACKED_RATE_KEYS:
+                    _user_rate_buckets.pop(next(iter(_user_rate_buckets)))
+            bucket = deque()
+            _user_rate_buckets[key] = bucket
+
+        while bucket and bucket[0] <= cutoff:
+            bucket.popleft()
+
+        if len(bucket) >= limit:
+            raise HTTPException(
+                status_code=429,
+                detail=f"Rate limit exceeded ({limit} requests per {window_seconds}s). Please wait and try again.",
+            )
+
+        bucket.append(now)
 
 def sanitize_prompt_tags(text: str) -> str:
     """Escape < and > characters to prevent delimiter breakout and prompt injection."""
@@ -191,9 +229,22 @@ limiter = Limiter(key_func=get_real_ip)
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
+@app.middleware("http")
+async def outer_rate_limit_middleware(request: Request, call_next):
+    if limiter.enabled:
+        handler = _find_route_handler(request.app.routes, request.scope)
+        if handler:
+            try:
+                limiter._check_request_limit(request, handler, in_middleware=False)
+                request.state._rate_limiting_complete = True
+            except RateLimitExceeded as exc:
+                return _rate_limit_exceeded_handler(request, exc)
+    return await call_next(request)
+
 # CORS Middleware
 has_wildcard_origin = "*" in ALLOWED_ORIGINS
 allow_credentials = not has_wildcard_origin
+is_dev_cors = not bool(ALLOWED_ORIGINS_RAW)
 
 # Allow all localhost / 127.0.0.1 ports (5173, 5174, etc.) and private local IPs in development
 dev_origin_regex = (
@@ -207,24 +258,26 @@ app.add_middleware(
     allow_origins=ALLOWED_ORIGINS,
     allow_origin_regex=dev_origin_regex,
     allow_credentials=allow_credentials,
-    allow_methods=["*"],
-    allow_headers=["*"],
-    allow_private_network=True,
+    allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type"],
+    allow_private_network=is_dev_cors,
 )
 
-# Gemini Model Cache
+# Thread-safe Gemini Model Cache
 _model_cache: dict[str, ChatGoogleGenerativeAI] = {}
+_model_cache_lock = threading.Lock()
 
 def get_gemini_model(model_name: str, timeout: float = 30.0) -> ChatGoogleGenerativeAI:
-    """Return a cached ChatGoogleGenerativeAI instance for the given model name."""
+    """Return a cached ChatGoogleGenerativeAI instance safely across worker threads."""
     cache_key = f"{model_name}_{timeout}"
-    if cache_key not in _model_cache:
-        _model_cache[cache_key] = ChatGoogleGenerativeAI(
-            model=model_name,
-            max_retries=2,
-            timeout=timeout,
-        )
-    return _model_cache[cache_key]
+    with _model_cache_lock:
+        if cache_key not in _model_cache:
+            _model_cache[cache_key] = ChatGoogleGenerativeAI(
+                model=model_name,
+                max_retries=2,
+                timeout=timeout,
+            )
+        return _model_cache[cache_key]
 
 def invoke_gemini(prompt: str, timeout: float = 30.0) -> str:
     """Invokes Gemini with automatic model fallback to prevent 503 high demand errors."""
@@ -250,8 +303,8 @@ def invoke_gemini(prompt: str, timeout: float = 30.0) -> str:
 EMAIL_REGEX = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
 class SignupRequest(BaseModel):
-    email: str
-    password: str = Field(..., min_length=8, description="Password must be at least 8 characters long.")
+    email: str = Field(..., max_length=254)
+    password: str = Field(..., min_length=8, max_length=128, description="Password must be 8-128 characters long.")
 
     @field_validator("email")
     @classmethod
@@ -262,12 +315,18 @@ class SignupRequest(BaseModel):
         return v.lower()
 
 class AuthRequest(BaseModel):
-    email: str
-    password: str
+    email: str = Field(..., max_length=254)
+    password: str = Field(..., min_length=1, max_length=128)
+
+    @field_validator("email")
+    @classmethod
+    def normalize_email(cls, v: str) -> str:
+        return v.strip().lower()
 
 class UserRequest(BaseModel):
     message: str = Field(..., min_length=1, max_length=MAX_MESSAGE_CHARS)
     document_text: Optional[str] = Field(default=None, max_length=30000)
+    document_name: Optional[str] = Field(default=None, max_length=255)
     session_id: Optional[str] = None
 
 class NewSessionRequest(BaseModel):
@@ -415,14 +474,14 @@ Preserve: the user's legal situation, key laws or sections mentioned, and any ad
         new_summary = invoke_gemini(summary_prompt)
         new_upto = to_summarize[-1].get("seq", 0) if to_summarize else fresh_upto
 
-        # Monotonic DB update: only write if existing summary_upto <= fresh_upto
+        # Monotonic DB update: handle NULL summary_upto safely alongside <= fresh_upto
         supabase.table("sessions") \
             .update({
                 "summary": new_summary,
-                "summary_upto": new_upto
+                "summary_upto": new_upto,
             }) \
             .eq("id", session_id) \
-            .lte("summary_upto", fresh_upto) \
+            .or_(f"summary_upto.is.null,summary_upto.lte.{fresh_upto}") \
             .execute()
 
         recent_text = "\n".join(f"{m['role']}: {m['content']}" for m in recent_msgs)
@@ -457,18 +516,18 @@ def readiness_check():
 @app.post("/signup")
 @limiter.limit("5/hour")
 def signup(request: Request, body: SignupRequest):
-    """Create a new JurixAI user account (automatically confirmed)."""
+    """Create a new JurixAI user account via standard Supabase signup (enforces email verification)."""
     try:
-        response = supabase_admin.auth.admin.create_user({
+        auth_client = _new_auth_client()
+        response = auth_client.auth.sign_up({
             "email": body.email,
             "password": body.password,
-            "email_confirm": True
         })
         if response.user:
             return {
                 "status": "success",
-                "message": "Account created successfully! You can now log in immediately.",
-                "user_id": str(response.user.id)
+                "message": "Account created. Please check your email to verify your account before logging in.",
+                "user_id": str(response.user.id),
             }
         raise HTTPException(status_code=400, detail="Signup failed. Please try again.")
     except HTTPException:
@@ -481,11 +540,12 @@ def signup(request: Request, body: SignupRequest):
 @app.post("/login")
 @limiter.limit("10/minute")
 def login(request: Request, body: AuthRequest):
-    """Log in and receive an access token for authenticated requests via anon client."""
+    """Log in and receive an access token using an isolated per-request anon client."""
     try:
-        response = supabase_auth.auth.sign_in_with_password({
+        auth_client = _new_auth_client()
+        response = auth_client.auth.sign_in_with_password({
             "email": body.email,
-            "password": body.password
+            "password": body.password,
         })
         if response.session:
             return {
@@ -493,7 +553,7 @@ def login(request: Request, body: AuthRequest):
                 "access_token": response.session.access_token,
                 "refresh_token": response.session.refresh_token,
                 "user_id": str(response.user.id),
-                "email": response.user.email
+                "email": response.user.email,
             }
         raise HTTPException(status_code=401, detail="Invalid email or password.")
     except HTTPException:
@@ -532,12 +592,13 @@ def create_session(request: NewSessionRequest, user=Depends(get_current_user)):
 
 @app.get("/sessions")
 def list_sessions(user=Depends(get_current_user)):
-    """List all sessions for the authenticated user, newest first."""
+    """List all sessions for the authenticated user, newest first (lightweight metadata only)."""
     try:
         response = supabase.table("sessions") \
-            .select("*") \
+            .select("id, title, document_name, created_at, updated_at") \
             .eq("user_id", str(user.id)) \
             .order("updated_at", desc=True) \
+            .limit(100) \
             .execute()
         return {"sessions": response.data}
     except HTTPException:
@@ -548,10 +609,13 @@ def list_sessions(user=Depends(get_current_user)):
 
 
 @app.get("/sessions/{session_id}/messages")
-def get_session_messages(session_id: str, user=Depends(get_current_user)):
-    """Fetch all messages for a specific session (must be owned by the user)."""
+def get_session_messages(
+    session_id: str,
+    limit: int = Query(default=100, ge=1, le=200),
+    user=Depends(get_current_user),
+):
+    """Fetch bounded message history for a specific session (must be owned by the user)."""
     try:
-        # Verify the user owns this session
         session = supabase.table("sessions") \
             .select("id") \
             .eq("id", session_id) \
@@ -563,9 +627,11 @@ def get_session_messages(session_id: str, user=Depends(get_current_user)):
         messages = supabase.table("messages") \
             .select("id, role, content, created_at, seq") \
             .eq("session_id", session_id) \
-            .order("seq", desc=False) \
+            .order("seq", desc=True) \
+            .limit(limit) \
             .execute()
-        return {"session_id": session_id, "messages": messages.data}
+        ordered_messages = list(reversed(messages.data or []))
+        return {"session_id": session_id, "messages": ordered_messages}
     except HTTPException:
         raise
     except Exception as e:
@@ -599,19 +665,24 @@ Image.MAX_IMAGE_PIXELS = 25_000_000
 warnings.simplefilter('error', Image.DecompressionBombWarning)
 MAX_IMAGE_DIMENSION = 2000
 
+OCR_TIMEOUT_SECONDS = 15
+
 def run_tesseract_ocr(image: Image.Image) -> str:
-    """Run OCR with 'eng+hin' languages, falling back to 'eng' if Hindi traineddata is missing."""
+    """Run OCR with 'eng+hin' languages and a strict timeout, falling back to 'eng' if Hindi data is missing."""
     try:
-        return pytesseract.image_to_string(image, lang="eng+hin")
+        return pytesseract.image_to_string(image, lang="eng+hin", timeout=OCR_TIMEOUT_SECONDS)
+    except RuntimeError as timeout_err:
+        logger.warning("Tesseract OCR timed out after %ds: %s", OCR_TIMEOUT_SECONDS, timeout_err)
+        raise HTTPException(status_code=504, detail="Document OCR timed out. Please try a smaller or clearer file.")
     except pytesseract.TesseractError as e:
         err_str = str(e).lower()
         if "hin" in err_str or "traineddata" in err_str or "language" in err_str:
             logger.warning("Tesseract 'eng+hin' failed, falling back to 'eng': %s", e)
-            return pytesseract.image_to_string(image, lang="eng")
+            return pytesseract.image_to_string(image, lang="eng", timeout=OCR_TIMEOUT_SECONDS)
         raise
     except Exception as e:
         logger.warning("OCR failed with 'eng+hin', attempting fallback to 'eng': %s", e)
-        return pytesseract.image_to_string(image, lang="eng")
+        return pytesseract.image_to_string(image, lang="eng", timeout=OCR_TIMEOUT_SECONDS)
 
 def extract_document_text_sync(filename: str, content: bytes) -> tuple[str, bool]:
     extracted_text = ""
@@ -624,36 +695,33 @@ def extract_document_text_sync(filename: str, content: bytes) -> tuple[str, bool
                 total_pages = len(pdf.pages)
                 if total_pages > 30:
                     was_truncated = True
-                # Cap processing to the first 30 pages to limit CPU and RAM consumption
                 for page in pdf.pages[:30]:
                     page_text = page.extract_text()
                     if page_text:
                         extracted_text += page_text + "\n"
-        except Exception as pdf_err:
-            logger.warning("pdfplumber failed extracting text: %s", pdf_err)
-            raise HTTPException(status_code=422, detail="Unable to parse PDF document.")
 
-        # OCR fallback for scanned PDFs with no embedded text
-        if not extracted_text.strip():
-            logger.info("PDF has no embedded text; falling back to OCR on first 8 pages.")
-            try:
-                with pdfplumber.open(io.BytesIO(content)) as pdf:
-                    if len(pdf.pages) > 8:
+                # OCR fallback for scanned PDFs with no embedded text (reuses open handle)
+                if not extracted_text.strip():
+                    logger.info("PDF has no embedded text; falling back to OCR on first 8 pages.")
+                    if total_pages > 8:
                         was_truncated = True
                     for page in pdf.pages[:8]:
                         try:
-                            # Render page at 200 DPI for OCR
                             page_img = page.to_image(resolution=200).original
                             if page_img.mode not in ("L", "RGB"):
                                 page_img = page_img.convert("RGB")
                             ocr_text = run_tesseract_ocr(page_img)
                             if ocr_text:
                                 extracted_text += ocr_text + "\n"
+                        except HTTPException:
+                            raise
                         except Exception as page_ocr_err:
                             logger.warning("OCR failed on scanned PDF page: %s", page_ocr_err)
-            except Exception as ocr_fallback_err:
-                logger.warning("PDF OCR fallback error: %s", ocr_fallback_err)
-                raise HTTPException(status_code=422, detail="Unable to parse or OCR scanned PDF.")
+        except HTTPException:
+            raise
+        except Exception as pdf_err:
+            logger.warning("pdfplumber failed extracting text: %s", pdf_err)
+            raise HTTPException(status_code=422, detail="Unable to parse PDF document.")
 
     elif lower_name.endswith((".png", ".jpg", ".jpeg")):
         try:
@@ -687,9 +755,10 @@ def extract_document_text_sync(filename: str, content: bytes) -> tuple[str, bool
     return cleaned_text, was_truncated
 
 @app.post("/upload")
-@limiter.limit("10/minute", key_func=get_user_or_ip_identifier)
+@limiter.limit("20/minute")
 async def process_document(request: Request, file: UploadFile = File(...), user=Depends(get_current_user)):
     """Upload a PDF or image document and extract its text content safely."""
+    enforce_user_rate_limit(str(user.id), scope="upload", limit=10, window_seconds=60)
     try:
         max_upload_bytes = MAX_UPLOAD_MB * 1024 * 1024
 
@@ -743,7 +812,15 @@ async def process_document(request: Request, file: UploadFile = File(...), user=
         elif lower_name.endswith((".png", ".jpg", ".jpeg")):
             try:
                 test_img = Image.open(io.BytesIO(content))
+                img_format = (test_img.format or "").upper()
                 test_img.verify()
+                if img_format not in ("PNG", "JPEG"):
+                    raise HTTPException(
+                        status_code=422,
+                        detail="Invalid image format: Only PNG and JPEG images are allowed.",
+                    )
+            except HTTPException:
+                raise
             except (Image.DecompressionBombError, Image.DecompressionBombWarning):
                 logger.warning("Decompression bomb detected during image verification.")
                 raise HTTPException(status_code=422, detail="Image exceeds maximum dimensions (decompression bomb protection).")
@@ -770,51 +847,53 @@ async def process_document(request: Request, file: UploadFile = File(...), user=
 #MAIN CHAT ENDPOINT
 
 @app.post("/chat")
-@limiter.limit("30/minute", key_func=get_user_or_ip_identifier)
+@limiter.limit("60/minute")
 def chat_with_jurix(request: Request, body: UserRequest, user=Depends(get_current_user)):
     """
     Main chat endpoint. Requires an authenticated user and a valid session_id.
     Saves all messages to Supabase with full history context.
     """
+    enforce_user_rate_limit(str(user.id), scope="chat", limit=30, window_seconds=60)
     try:
         session_id = body.session_id
         user_msg = body.message
 
-        # Check if session_id is a valid UUID
-        is_valid_uuid = False
+        session_data = None
         if session_id and session_id != "string":
             try:
                 uuid.UUID(str(session_id))
-                is_valid_uuid = True
             except ValueError:
-                is_valid_uuid = False
+                raise HTTPException(status_code=400, detail="Invalid session_id format.")
 
-        session_data = None
-        if is_valid_uuid:
             res = supabase.table("sessions") \
                 .select("id, title, document_text, document_name") \
                 .eq("id", session_id) \
                 .eq("user_id", str(user.id)) \
                 .execute()
-            if res.data:
-                session_data = res.data[0]
+            if not res.data:
+                raise HTTPException(status_code=404, detail="Session not found.")
+            session_data = res.data[0]
 
-        # Determine active document text (request override or persistent session document)
+        # Determine active document text & name (request override or persistent session document)
         active_doc_text = None
+        active_doc_name = None
         if body.document_text:
             active_doc_text = body.document_text[:30000]
+            active_doc_name = (body.document_name or "Uploaded Document").strip()[:255]
         elif session_data and session_data.get("document_text"):
             active_doc_text = session_data["document_text"]
+            active_doc_name = session_data.get("document_name") or "Uploaded Document"
 
         # If no valid existing session, auto-create one for this user
         if not session_data:
             short_title = user_msg[:50] + ("..." if len(user_msg) > 50 else "")
             new_session_payload = {
                 "user_id": str(user.id),
-                "title": short_title
+                "title": short_title,
             }
             if active_doc_text:
                 new_session_payload["document_text"] = active_doc_text
+                new_session_payload["document_name"] = active_doc_name
             new_session = supabase.table("sessions").insert(new_session_payload).execute()
             session_id = new_session.data[0]["id"]
         else:
@@ -823,6 +902,7 @@ def chat_with_jurix(request: Request, body: UserRequest, user=Depends(get_curren
                 update_payload["title"] = user_msg[:50] + ("..." if len(user_msg) > 50 else "")
             if body.document_text:
                 update_payload["document_text"] = active_doc_text
+                update_payload["document_name"] = active_doc_name
             if update_payload:
                 supabase.table("sessions") \
                     .update(update_payload) \
@@ -846,7 +926,11 @@ def chat_with_jurix(request: Request, body: UserRequest, user=Depends(get_curren
         doc_section = ""
         if active_doc_text:
             safe_doc = sanitize_prompt_tags(active_doc_text)
-            doc_section = f"\n\nUSER UPLOADED DOCUMENT:\n<uploaded_document>\n{safe_doc}\n</uploaded_document>"
+            safe_doc_name = sanitize_prompt_tags(active_doc_name or "Uploaded Document")
+            doc_section = (
+                f"\n\nUSER UPLOADED DOCUMENT ({safe_doc_name}):\n"
+                f"<uploaded_document>\n{safe_doc}\n</uploaded_document>"
+            )
 
         #promt to gemini
         prompt = f"""
@@ -864,7 +948,7 @@ Your responses MUST be grounded in Indian Law (IPC/BNS, CrPC/BNSS, Constitution,
 
 ━━━━━━━━━━━━━━━━━━━━━━━
 📂 PHASE 0: DOCUMENT-ONLY HANDLING
-- If the user's message is empty or says something like "read this", "check this", "see the photo", and there is 'USER UPLOADED DOCUMENT CONTENT' in the history:
+- If the user's message is empty or says something like "read this", "check this", "see the photo", and <uploaded_document> content is present:
   1. IDENTIFY: Nature of the document (FIR, Court Summons, Legal Notice, Rent Agreement, Invoice, Complaint, etc.).
   2. RISK SCAN: Flag any IPC/BNS Sections, deadlines (dates), monetary amounts, or named parties.
   3. CALM SUMMARY: Start with "Maine aapka ye [Document Name] dhyan se padha hai — let me break it down for you."

@@ -270,7 +270,7 @@ function App() {
     }
   }
 
-  async function sendMessage(text = draft, activeToken = token, documentText = null) {
+  async function sendMessage(text = draft, activeToken = token, doc = null) {
     const content = text.trim()
     if (!content || busy) return
     if (!activeToken) {
@@ -281,18 +281,16 @@ function App() {
     }
     setDraft('')
     setError('')
-    setNotice('')
     const userMessage = { id: crypto.randomUUID(), role: 'user', content }
     setMessages((current) => [...current, userMessage])
     setBusy(true)
     try {
-      const payload = { session_id: activeSession?.id || null, message: content }
-      if (documentText) {
-        payload.document_text = documentText
-      } else if (content.includes('\n\nDOCUMENT TEXT:\n')) {
-        const [msgPart, docPart] = content.split('\n\nDOCUMENT TEXT:\n')
-        payload.message = msgPart
-        payload.document_text = docPart
+      const payload = {
+        session_id: activeSession?.id || null,
+        message: content,
+        ...(doc?.document_text
+          ? { document_text: doc.document_text, document_name: doc.document_name }
+          : {}),
       }
       const data = await request('/chat', {
         method: 'POST',
@@ -329,11 +327,14 @@ function App() {
       if (!data.extracted_text?.trim()) {
         throw new Error('No readable text was found. Try a clearer scan or image.')
       }
+      if (data.truncated) {
+        setNotice(`"${file.name}" was large — analyzed the first 30,000 characters.`)
+      }
       setPendingFile(null)
       await sendMessage(
-        `Please review this uploaded ${file.name} and explain the important details, risks, deadlines, and what I should do next.`,
+        `Please review the uploaded document "${file.name}" and explain the key details, risks, deadlines, and what I should do next.`,
         token,
-        data.extracted_text
+        { document_text: data.extracted_text, document_name: file.name }
       )
     } catch (e) {
       setError(e.message)

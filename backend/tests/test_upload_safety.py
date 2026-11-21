@@ -24,6 +24,10 @@ class TestUploadSafety(unittest.TestCase):
     def tearDownClass(cls):
         app.dependency_overrides.clear()
 
+    def setUp(self):
+        backend.limiter.reset()
+        backend._user_rate_buckets.clear()
+
     def test_oversized_file_content_length_returns_413(self):
         """Content-Length exceeding MAX_UPLOAD_MB must immediately return 413 without loading body."""
         resp = self.client.post(
@@ -42,6 +46,16 @@ class TestUploadSafety(unittest.TestCase):
         )
         self.assertEqual(resp.status_code, 422)
         self.assertIn("%pdf header", resp.json()["detail"].lower())
+
+    def test_spoofed_image_format_returns_422(self):
+        """Image with .png extension but actual GIF format returns 422."""
+        gif_bytes = b"GIF89a\x01\x00\x01\x00\x80\x00\x00\xff\xff\xff\x00\x00\x00!\xf9\x04\x01\x00\x00\x00\x00,\x00\x00\x00\x00\x01\x00\x01\x00\x00\x02\x02D\x01\x00;"
+        resp = self.client.post(
+            "/upload",
+            files={"file": ("spoofed.png", gif_bytes, "image/png")}
+        )
+        self.assertEqual(resp.status_code, 422)
+        self.assertIn("only png and jpeg", resp.json()["detail"].lower())
 
     def test_decompression_bomb_returns_422(self):
         """Images triggering DecompressionBombError return 422, never 500."""

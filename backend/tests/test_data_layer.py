@@ -37,12 +37,12 @@ class TestDataLayer(unittest.TestCase):
             self.assertEqual(resp.status_code, 200)
 
     def test_get_session_messages_orders_by_seq(self):
-        """get_session_messages orders by seq ascending."""
+        """get_session_messages orders by seq ascending (after fetching latest descending)."""
         with patch("backend.supabase.table") as mock_table:
             mock_table.return_value.select.return_value.eq.return_value.eq.return_value.execute.return_value.data = [{"id": "s1"}]
-            mock_table.return_value.select.return_value.eq.return_value.order.return_value.execute.return_value.data = [
-                {"id": "m1", "role": "User", "content": "Hi", "created_at": "2026-11-03T00:00:00Z", "seq": 1},
-                {"id": "m2", "role": "JurixAI", "content": "Hello", "created_at": "2026-11-03T00:00:01Z", "seq": 2}
+            mock_table.return_value.select.return_value.eq.return_value.order.return_value.limit.return_value.execute.return_value.data = [
+                {"id": "m2", "role": "JurixAI", "content": "Hello", "created_at": "2026-11-03T00:00:01Z", "seq": 2},
+                {"id": "m1", "role": "User", "content": "Hi", "created_at": "2026-11-03T00:00:00Z", "seq": 1}
             ]
             resp = self.client.get("/sessions/s1/messages")
             self.assertEqual(resp.status_code, 200)
@@ -147,13 +147,15 @@ class TestDataLayer(unittest.TestCase):
             app.state.db = MagicMock()
             app.state.db.similarity_search.return_value = []
 
-            # Turn 1: with document_text
+            # Turn 1: with document_text and document_name
             self.client.post("/chat", json={
                 "session_id": "00000000-0000-0000-0000-000000000020",
                 "message": "Analyze this contract",
-                "document_text": "CONTRACT TEXT: Section 5 Arbitration clause"
+                "document_text": "CONTRACT TEXT: Section 5 Arbitration clause",
+                "document_name": "Contract.pdf"
             })
             self.assertIn("Arbitration clause", captured_prompts[0])
+            self.assertIn("USER UPLOADED DOCUMENT (Contract.pdf):", captured_prompts[0])
 
             # Turn 2: without document_text (follow-up)
             self.client.post("/chat", json={
@@ -161,6 +163,43 @@ class TestDataLayer(unittest.TestCase):
                 "message": "Where will the arbitration take place?"
             })
             self.assertIn("Arbitration clause", captured_prompts[1])
+            self.assertIn("USER UPLOADED DOCUMENT (Contract.pdf):", captured_prompts[1])
+
+    def test_chat_unknown_session_id_returns_404(self):
+        """Passing an unknown or non-owned session_id to /chat must return 404."""
+        with patch("backend.supabase.table") as mock_table:
+            # session not found
+            mock_table.return_value.select.return_value.eq.return_value.eq.return_value.execute.return_value.data = []
+            resp = self.client.post("/chat", json={
+                "session_id": "00000000-0000-0000-0000-000000000099",
+                "message": "Hello"
+            })
+            self.assertEqual(resp.status_code, 404)
+            self.assertEqual(resp.json()["detail"], "Session not found.")
+
+    def test_chat_invalid_session_id_format_returns_400(self):
+        """Passing a malformed session_id to /chat must return 400."""
+        resp = self.client.post("/chat", json={
+            "session_id": "not-a-valid-uuid",
+            "message": "Hello"
+        })
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("Invalid session_id format", resp.json()["detail"])
+
+    def test_list_sessions_excludes_heavy_document_text(self):
+        """GET /sessions must return only lightweight metadata, never 30KB document_text."""
+        with patch("backend.supabase.table") as mock_table:
+            mock_select = mock_table.return_value.select
+            mock_select.return_value.eq.return_value.order.return_value.limit.return_value.execute.return_value.data = [
+                {"id": "s1", "title": "Contract Review", "document_name": "contract.pdf", "created_at": "2026-11-03T00:00:00Z", "updated_at": "2026-11-03T00:00:00Z"}
+            ]
+            resp = self.client.get("/sessions")
+            self.assertEqual(resp.status_code, 200)
+            mock_select.assert_called_with("id, title, document_name, created_at, updated_at")
+            data = resp.json()["sessions"]
+            self.assertEqual(len(data), 1)
+            self.assertNotIn("document_text", data[0])
+            self.assertNotIn("summary", data[0])
 
 if __name__ == "__main__":
     unittest.main()
