@@ -419,12 +419,12 @@ function App() {
   const isGuest = !token
 
   return (
-    <div className="cobalt-shell">
+    <div className={`cobalt-shell ${inChat ? 'chat-dark mode-chat' : ''}`}>
       {sidebarOpen && (
         <button className="sidebar-scrim" aria-label="Close menu" onClick={() => setSidebarOpen(false)} />
       )}
 
-      <aside className={`sidebar ${sidebarOpen ? 'sidebar-open' : ''}`}>
+      <aside className={`sidebar ${sidebarOpen ? 'sidebar-open' : ''} ${inChat ? 'sidebar-chat-dark' : ''}`}>
         <div className="sidebar-head">
           <div className="sidebar-brand">
             <span className="sidebar-brand-icon"><Scale size={18} /></span>
@@ -929,19 +929,28 @@ function GitHubIcon() {
 
 function Message({ message }) {
   const isUser = message.role === 'user'
+  if (isUser) {
+    return (
+      <article className="message-row user-row">
+        <div className="message-bubble user-bubble">
+          {message.content}
+        </div>
+      </article>
+    )
+  }
+
   return (
-    <article className={`message-row ${isUser ? 'user-row' : 'assistant-row'}`}>
-      {!isUser && <div className="assistant-avatar"><Scale size={15} /></div>}
+    <article className="message-row assistant-row">
+      <div className="assistant-avatar"><Scale size={16} /></div>
       <div className="message-body">
         <div className="message-meta">
-          {isUser ? 'You' : 'JurixAI'}
-          {!isUser && <span> · Legal AI support</span>}
+          <strong>JurixAI</strong>
+          <span> · Legal AI Saathi</span>
         </div>
-        <div className={`message-bubble ${isUser ? 'user-bubble' : 'assistant-bubble'}`}>
-          {isUser ? message.content : <FormattedText text={message.content} />}
+        <div className="message-bubble assistant-bubble">
+          <FormattedText text={message.content} />
         </div>
       </div>
-      {isUser && <div className="user-avatar">You</div>}
     </article>
   )
 }
