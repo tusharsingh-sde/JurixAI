@@ -6,7 +6,7 @@ ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PIP_NO_CACHE_DIR=1 \
     DEBIAN_FRONTEND=noninteractive \
-    HF_HOME=/app/hf_cache \
+    HF_HOME=/app/.cache/huggingface \
     CHROMA_DIR=/app/Jurixai_db
 
 WORKDIR /app
@@ -25,27 +25,28 @@ RUN pip install --no-cache-dir torch==2.11.0 --index-url https://download.pytorc
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Pre-download and bake embedding model at build time (no dependency on gitignored local_model_cache)
-RUN mkdir -p /app/hf_cache /app/local_model_cache && \
+# Pre-download and bake embedding model at build time into /app/local_model_cache
+RUN mkdir -p /app/.cache/huggingface /app/local_model_cache && \
     python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('all-MiniLM-L6-v2').save('/app/local_model_cache/all-MiniLM-L6-v2')"
 
 # Enforce strict offline mode at runtime after model is baked into image
 ENV HF_HUB_OFFLINE=1
 
-# Create non-root application user
-RUN useradd -m -u 1000 appuser
+# Create non-root application user (UID 1000 required for Hugging Face Spaces Docker SDK)
+RUN useradd -m -u 1000 user
 
 # Copy application files and prebuilt vector database
 COPY backend.py .
 COPY Jurixai_db ./Jurixai_db
 
-# Ensure appuser owns ChromaDB, baked model cache, and HF_HOME
-RUN chown -R appuser:appuser /app/Jurixai_db /app/local_model_cache /app/hf_cache
-USER appuser
+# Ensure non-root user owns /app and subdirectories with full write permissions (prevents SQLite readonly errors)
+RUN chown -R user:user /app && chmod -R 775 /app
 
-EXPOSE 8000
+USER user
+
+EXPOSE 8000 7860
 
 HEALTHCHECK --interval=30s --timeout=10s --start-period=120s --retries=3 \
     CMD python -c "import os, urllib.request; port = os.getenv('PORT', '8000'); urllib.request.urlopen(f'http://127.0.0.1:{port}/health')" || exit 1
 
-CMD ["sh", "-c", "exec uvicorn backend:app --host 0.0.0.0 --port ${PORT:-8000} --workers 1 --proxy-headers --forwarded-allow-ips \"${FORWARDED_ALLOW_IPS:-127.0.0.1}\""]
+CMD ["sh", "-c", "exec uvicorn backend:app --host 0.0.0.0 --port ${PORT:-8000} --proxy-headers --forwarded-allow-ips='*'"]
