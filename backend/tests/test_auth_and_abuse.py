@@ -331,6 +331,152 @@ class TestAuthAndAbuse(unittest.TestCase):
         resp = self.client.get("/sessions")
         self.assertIn(resp.status_code, (401, 403))
 
+    def test_is_small_talk_classification(self):
+        """is_small_talk returns True for greetings/acknowledgements and False for legal queries."""
+        # True cases: short greetings, closings, acknowledgements under 5 words
+        self.assertTrue(backend.is_small_talk("hi"))
+        self.assertTrue(backend.is_small_talk("Hello JurixAI"))
+        self.assertTrue(backend.is_small_talk("Namaste, kaise ho?"))
+        self.assertTrue(backend.is_small_talk("thank you so much"))
+        self.assertTrue(backend.is_small_talk("ok got it"))
+        self.assertTrue(backend.is_small_talk("bye tc"))
+        self.assertTrue(backend.is_small_talk("theek hai shukriya"))
+
+        # False cases: contains legal keywords even if short
+        self.assertFalse(backend.is_small_talk("hi what is bail"))
+        self.assertFalse(backend.is_small_talk("FIR kaise darj karein?"))
+        self.assertFalse(backend.is_small_talk("Section 138 notice"))
+        self.assertFalse(backend.is_small_talk("police arrested my friend"))
+        self.assertFalse(backend.is_small_talk("IPC 420 kya hai?"))
+        self.assertFalse(backend.is_small_talk("consumer complaint process"))
+
+        # False cases: longer than 5 words
+        self.assertFalse(backend.is_small_talk("hello how are you doing today my friend"))
+        # False cases: empty or whitespace
+        self.assertFalse(backend.is_small_talk(""))
+        self.assertFalse(backend.is_small_talk("   "))
+
+    def test_chat_skips_rag_on_small_talk(self):
+        """Small talk messages skip ChromaDB similarity_search completely and use minimal prompt."""
+        captured_prompts = []
+        with patch("backend.invoke_gemini", side_effect=lambda p: (captured_prompts.append(p), "Hello! How can I help?")[1]):
+            mock_db = MagicMock()
+            app.state.db = mock_db
+
+            resp = self.client.post("/chat", json={"message": "hello jurixai"})
+            self.assertEqual(resp.status_code, 200)
+
+            # Verification: Chroma DB was NEVER queried for small talk
+            mock_db.similarity_search.assert_not_called()
+
+            # Verification: Minimal prompt was used (< 600 characters)
+            self.assertEqual(len(captured_prompts), 1)
+            self.assertLess(len(captured_prompts[0]), 600)
+            self.assertIn("The user is greeting you", captured_prompts[0])
+
+    def test_chat_performs_rag_on_legal_query(self):
+        """Legal queries trigger ChromaDB similarity_search with RAG_TOP_K and full grounding prompt."""
+        captured_prompts = []
+        with patch("backend.invoke_gemini", side_effect=lambda p: (captured_prompts.append(p), "Here is legal guidance")[1]):
+            mock_db = MagicMock()
+            doc_mock = MagicMock(page_content="Section 436 CrPC deals with bailable offences.")
+            mock_db.similarity_search.return_value = [doc_mock]
+            app.state.db = mock_db
+
+            resp = self.client.post("/chat", json={"message": "Can I get bail for bailable offence?"})
+            self.assertEqual(resp.status_code, 200)
+
+            # Verification: Chroma DB WAS queried with k=RAG_TOP_K (default: 3)
+            mock_db.similarity_search.assert_called_once_with("Can I get bail for bailable offence?", k=backend.RAG_TOP_K)
+            self.assertEqual(len(captured_prompts), 1)
+            self.assertIn("LEGAL KNOWLEDGE BASE:", captured_prompts[0])
+            self.assertIn("Section 436 CrPC deals with bailable offences.", captured_prompts[0])
+
+    def test_chat_does_not_skip_rag_when_document_present(self):
+        """When an uploaded document is present, even a greeting does NOT skip RAG/document pipeline."""
+        captured_prompts = []
+        with patch("backend.invoke_gemini", side_effect=lambda p: (captured_prompts.append(p), "Document review response")[1]):
+            mock_db = MagicMock()
+            mock_db.similarity_search.return_value = []
+            app.state.db = mock_db
+
+            resp = self.client.post("/chat", json={
+                "message": "hello",
+                "document_text": "This is a rental deed between landlord and tenant.",
+                "document_name": "Rental_Agreement.pdf"
+            })
+            self.assertEqual(resp.status_code, 200)
+
+            # Verification: Chroma similarity_search WAS called
+            mock_db.similarity_search.assert_called_once()
+            self.assertEqual(len(captured_prompts), 1)
+            self.assertIn("<uploaded_document>", captured_prompts[0])
+            self.assertIn("Rental_Agreement.pdf", captured_prompts[0])
+
+    def test_guest_history_and_context_budget_truncation(self):
+        """Guest history is capped to MAX_HISTORY_MESSAGES=4, 700 chars per message, doc text capped at 6000."""
+        captured_prompts = []
+        with patch("backend.invoke_gemini", side_effect=lambda p: (captured_prompts.append(p), "AI reply")[1]):
+            mock_db = MagicMock()
+            mock_db.similarity_search.return_value = []
+            app.state.db = mock_db
+
+            # Create 7 guest history items each 1000 chars long
+            history_input = [
+                {"role": "User", "content": f"Turn {i} " + ("X" * 1000)}
+                for i in range(7)
+            ]
+            long_doc = "D" * 10000
+
+            resp = self.client.post("/chat", json={
+                "message": "Explain my legal notice",
+                "guest_history": history_input,
+                "document_text": long_doc,
+                "document_name": "Notice.pdf"
+            })
+            self.assertEqual(resp.status_code, 200)
+            self.assertEqual(len(captured_prompts), 1)
+            prompt = captured_prompts[0]
+
+            # Only the last 4 turns (3, 4, 5, 6) should be present; older turns (0, 1, 2) omitted
+            self.assertNotIn("Turn 0", prompt)
+            self.assertNotIn("Turn 1", prompt)
+            self.assertNotIn("Turn 2", prompt)
+            self.assertIn("Turn 3", prompt)
+            self.assertIn("Turn 6", prompt)
+
+            # Each turn should be truncated to MAX_HISTORY_MSG_CHARS (700)
+            # Thus "X" * 1000 should never appear intact
+            self.assertNotIn("X" * 750, prompt)
+
+            # Injected document text should be truncated to MAX_DOC_CONTEXT_CHARS (6000)
+            self.assertNotIn("D" * 6500, prompt)
+            self.assertIn("D" * 6000, prompt)
+
+    def test_rag_context_capped_at_budget(self):
+        """Concatenated ChromaDB context is capped at MAX_RAG_CONTEXT_CHARS=3500."""
+        captured_prompts = []
+        with patch("backend.invoke_gemini", side_effect=lambda p: (captured_prompts.append(p), "AI reply")[1]):
+            mock_db = MagicMock()
+            # Return 3 massive docs totaling 9000 chars
+            mock_db.similarity_search.return_value = [
+                MagicMock(page_content="C" * 3000),
+                MagicMock(page_content="C" * 3000),
+                MagicMock(page_content="C" * 3000),
+            ]
+            app.state.db = mock_db
+
+            resp = self.client.post("/chat", json={"message": "Legal question on statute"})
+            self.assertEqual(resp.status_code, 200)
+            self.assertEqual(len(captured_prompts), 1)
+            prompt = captured_prompts[0]
+
+            # Context between <legal_context> tags must be exactly capped to MAX_RAG_CONTEXT_CHARS (3500)
+            context_inside = prompt.split("<legal_context>\n")[1].split("\n</legal_context>")[0]
+            self.assertEqual(len(context_inside), backend.MAX_RAG_CONTEXT_CHARS)
+            self.assertNotIn("C" * 3600, prompt)
+            self.assertIn("C" * 3000, prompt)
+
 if __name__ == "__main__":
     unittest.main()
 

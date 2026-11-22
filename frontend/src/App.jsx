@@ -281,9 +281,9 @@ function App() {
 
     const isGuest = !activeToken
     const recentGuestHistory = isGuest
-      ? messages.slice(-6).map((m) => ({
+      ? messages.slice(-4).map((m) => ({
           role: m.role === 'user' ? 'User' : 'JurixAI',
-          content: (m.content || '').slice(0, 4000),
+          content: (m.content || '').slice(0, 700),
         }))
       : null
 
@@ -302,7 +302,7 @@ function App() {
           ? { guest_history: recentGuestHistory }
           : { session_id: activeSession?.id || null }),
         ...(activeDoc?.document_text
-          ? { document_text: activeDoc.document_text, document_name: activeDoc.document_name }
+          ? { document_text: activeDoc.document_text.slice(0, 6000), document_name: activeDoc.document_name }
           : {}),
       }
       const data = await request('/chat', {

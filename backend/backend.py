@@ -116,8 +116,107 @@ try:
 except ValueError:
     GEMINI_MAX_OUTPUT_TOKENS = 1024
 
-CHROMA_DIR = os.getenv("CHROMA_DIR", "./Jurixai_db")
+def _resolve_canonical_chroma_dir() -> str:
+    env_dir = os.getenv("CHROMA_DIR")
+    if env_dir:
+        return env_dir
+    backend_db = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Jurixai_db")
+    if os.path.exists(backend_db):
+        return backend_db
+    return "./Jurixai_db"
+
+CHROMA_DIR = _resolve_canonical_chroma_dir()
 FORWARDED_ALLOW_IPS = os.getenv("FORWARDED_ALLOW_IPS", "127.0.0.1")
+
+# Input Token & Context Optimization Budgets
+try:
+    RAG_TOP_K = int(os.getenv("RAG_TOP_K", "3"))
+except ValueError:
+    RAG_TOP_K = 3
+
+try:
+    MAX_RAG_CONTEXT_CHARS = int(os.getenv("MAX_RAG_CONTEXT_CHARS", "3500"))
+except ValueError:
+    MAX_RAG_CONTEXT_CHARS = 3500
+
+try:
+    MAX_HISTORY_MESSAGES = int(os.getenv("MAX_HISTORY_MESSAGES", "4"))
+except ValueError:
+    MAX_HISTORY_MESSAGES = 4
+
+try:
+    MAX_HISTORY_MSG_CHARS = int(os.getenv("MAX_HISTORY_MSG_CHARS", "700"))
+except ValueError:
+    MAX_HISTORY_MSG_CHARS = 700
+
+try:
+    MAX_DOC_CONTEXT_CHARS = int(os.getenv("MAX_DOC_CONTEXT_CHARS", "6000"))
+except ValueError:
+    MAX_DOC_CONTEXT_CHARS = 6000
+
+# Small Talk Detection & RAG Bypass
+_SMALL_TALK_TOKENS = {
+    "hi", "hello", "hey", "heya", "namaste", "namaskar", "pranam", "pranaam",
+    "thanks", "thank", "thx", "dhanyawad", "dhanyavaad", "shukriya",
+    "ok", "okay", "k", "kk", "bye", "goodbye", "alvida", "tata", "tc",
+    "yes", "ha", "haan", "no", "nah", "nahi", "gm", "gn", "sup", "yo",
+    "cool", "fine", "great", "good", "morning", "evening", "afternoon", "night",
+    "kaise", "kese", "ho", "kya", "haal", "hai", "how", "are", "you",
+    "whats", "what's", "up", "theek", "thik", "understood", "got", "it",
+    "alright", "all", "right", "bro", "sir", "bhai", "ji", "jurixai", "jurix",
+    "help", "so", "much", "welcome", "please", "pls", "a", "lot", "very",
+    "there", "to", "me", "am", "is", "can", "take", "care"
+}
+
+_LEGAL_KEYWORDS = {
+    "law", "laws", "legal", "court", "judge", "police", "fir", "bail", "arrest",
+    "arrested", "jail", "ipc", "bns", "crpc", "bnss", "cpc", "bsa", "dhara", "section",
+    "act", "article", "cheque", "notice", "case", "crime", "criminal", "fraud", "scam",
+    "cyber", "property", "tenant", "tenancy", "rent", "agreement", "divorce",
+    "marriage", "custody", "posh", "harassment", "assault", "domestic",
+    "violence", "consumer", "rti", "rights", "tax", "wage", "wages",
+    "contract", "complaint", "challan", "fine", "penalty", "advocate",
+    "lawyer", "vakil", "kanoon", "nyaya", "sanhita", "magistrate",
+    "affidavit", "warrant", "summon", "summons", "petition", "appeal", "suit",
+    "accused", "victim", "theft", "murder", "dowry", "defamation", "evidence"
+}
+
+def is_small_talk(message: str) -> bool:
+    """
+    Detect whether a message is brief small talk, greeting, or acknowledgement
+    (e.g., 'hi', 'hello', 'namaste', 'thanks', 'ok', 'bye', under ~5 words with zero legal keywords).
+    Returns True to allow skipping ChromaDB RAG retrieval and saving input tokens.
+    """
+    if not message:
+        return False
+    text = message.strip().lower()
+    clean = re.sub(r"[^\w\s]", " ", text)
+    words = clean.split()
+    if not words or len(words) > 5:
+        return False
+    if any(w in _LEGAL_KEYWORDS for w in words):
+        return False
+    return all(w in _SMALL_TALK_TOKENS for w in words)
+
+def build_small_talk_prompt(user_msg: str, history_text: str) -> str:
+    """Minimal conversational prompt for small talk to dramatically reduce input tokens."""
+    safe_history = sanitize_prompt_tags(history_text)
+    safe_user_msg = sanitize_prompt_tags(user_msg)
+    return f"""You are JurixAI — a calm, friendly, and helpful Indian Legal Saathi.
+The user is greeting you, acknowledging a previous reply, or making small talk.
+Respond warmly, politely, and concisely in 1-2 sentences in the user's language/script (Hinglish, Hindi, or English).
+End with a gentle offer to assist with any Indian legal query or document (no raw legalese, no panic, no robotic templates).
+
+PAST CONVERSATION:
+<past_conversation>
+{safe_history}
+</past_conversation>
+
+USER'S MESSAGE:
+<user_message>
+{safe_user_msg}
+</user_message>
+"""
 
 # Tesseract OCR path configuration
 # 1. Custom path via TESSERACT_PATH environment variable
@@ -178,8 +277,8 @@ async def lifespan(app: FastAPI):
         db._collection.count(),
     )
     logger.info(
-        "JurixAI started with settings: models=%s, allowed_origins_count=%d, max_upload_mb=%d, max_message_chars=%d, max_guest_chars=%d, max_global_daily=%d, chroma_dir=%s",
-        GEMINI_MODELS, len(ALLOWED_ORIGINS), MAX_UPLOAD_MB, MAX_MESSAGE_CHARS, MAX_GUEST_MESSAGE_CHARS, MAX_GLOBAL_DAILY_REQUESTS, CHROMA_DIR,
+        "JurixAI started with settings: models=%s, allowed_origins_count=%d, max_upload_mb=%d, max_message_chars=%d, max_guest_chars=%d, max_global_daily=%d, rag_top_k=%d, max_rag_chars=%d, chroma_dir=%s",
+        GEMINI_MODELS, len(ALLOWED_ORIGINS), MAX_UPLOAD_MB, MAX_MESSAGE_CHARS, MAX_GUEST_MESSAGE_CHARS, MAX_GLOBAL_DAILY_REQUESTS, RAG_TOP_K, MAX_RAG_CONTEXT_CHARS, CHROMA_DIR,
     )
     port_env = os.getenv("PORT")
     if port_env and FORWARDED_ALLOW_IPS == "127.0.0.1":
@@ -411,7 +510,7 @@ class UserRequest(BaseModel):
     document_text: Optional[str] = Field(default=None, max_length=30000)
     document_name: Optional[str] = Field(default=None, max_length=255)
     session_id: Optional[str] = None
-    guest_history: Optional[list[GuestMessage]] = Field(default=None, max_length=6)
+    guest_history: Optional[list[GuestMessage]] = Field(default=None, max_length=10)
 
 class NewSessionRequest(BaseModel):
     title: Optional[str] = "New Conversation"
@@ -448,8 +547,16 @@ def get_optional_user(
     return get_current_user(credentials)
 
 # History Helper — rolling summary with database caching and monotonic concurrency safety
-MAX_VERBATIM = 10        # Last N messages sent as-is
-SUMMARY_BATCH_MIN = 10   # Only re-summarize when 10+ new old messages accumulate
+MAX_VERBATIM = MAX_HISTORY_MESSAGES   # Last N messages sent as-is (default: 4)
+SUMMARY_BATCH_MIN = 10                # Only re-summarize when 10+ new old messages accumulate
+
+def _format_history_turns(msgs: list) -> str:
+    lines = []
+    for m in msgs:
+        role = m.get("role", "User")
+        content = (m.get("content") or "")[:MAX_HISTORY_MSG_CHARS]
+        lines.append(f"{role}: {content}")
+    return "\n".join(lines)
 
 # Per-session lock for in-process concurrency safety (bounded cache prevents memory leaks)
 MAX_CACHED_SESSION_LOCKS = 1000
@@ -500,7 +607,7 @@ def get_history_for_prompt(session_id: str) -> str:
 
     # If all messages in session fit within MAX_VERBATIM, return them verbatim without summary
     if len(recent_msgs) < MAX_VERBATIM:
-        return "\n".join(f"{m['role']}: {m['content']}" for m in recent_msgs)
+        return _format_history_turns(recent_msgs)
 
     # 3. Oldest verbatim seq boundary
     oldest_verbatim_seq = recent_msgs[0].get("seq", 0)
@@ -517,11 +624,12 @@ def get_history_for_prompt(session_id: str) -> str:
     # 4. Check if 10+ new old messages have accumulated since summary_upto
     if len(unsummarized) < SUMMARY_BATCH_MIN:
         # Fewer than 10 new old messages: reuse stored summary if available
-        recent_text = "\n".join(f"{m['role']}: {m['content']}" for m in recent_msgs)
+        recent_text = _format_history_turns(recent_msgs)
         if stored_summary:
-            return f"[EARLIER SUMMARY]:\n{stored_summary}\n\n[RECENT MESSAGES]:\n{recent_text}"
+            trimmed_sum = stored_summary[:MAX_HISTORY_MSG_CHARS]
+            return f"[EARLIER SUMMARY]:\n{trimmed_sum}\n\n[RECENT MESSAGES]:\n{recent_text}"
         elif unsummarized:
-            all_text = "\n".join(f"{m['role']}: {m['content']}" for m in unsummarized + recent_msgs)
+            all_text = _format_history_turns(unsummarized + recent_msgs)
             return all_text
         else:
             return recent_text
@@ -540,8 +648,9 @@ def get_history_for_prompt(session_id: str) -> str:
 
         latest_unsummarized_seq = unsummarized[-1].get("seq", 0)
         if fresh_upto >= latest_unsummarized_seq and fresh_summary:
-            recent_text = "\n".join(f"{m['role']}: {m['content']}" for m in recent_msgs)
-            return f"[EARLIER SUMMARY]:\n{fresh_summary}\n\n[RECENT MESSAGES]:\n{recent_text}"
+            recent_text = _format_history_turns(recent_msgs)
+            trimmed_sum = fresh_summary[:MAX_HISTORY_MSG_CHARS]
+            return f"[EARLIER SUMMARY]:\n{trimmed_sum}\n\n[RECENT MESSAGES]:\n{recent_text}"
 
         to_summarize = supabase.table("messages") \
             .select("role, content, seq") \
@@ -552,8 +661,9 @@ def get_history_for_prompt(session_id: str) -> str:
             .execute().data or []
 
         if len(to_summarize) < SUMMARY_BATCH_MIN and fresh_summary:
-            recent_text = "\n".join(f"{m['role']}: {m['content']}" for m in recent_msgs)
-            return f"[EARLIER SUMMARY]:\n{fresh_summary}\n\n[RECENT MESSAGES]:\n{recent_text}"
+            recent_text = _format_history_turns(recent_msgs)
+            trimmed_sum = fresh_summary[:MAX_HISTORY_MSG_CHARS]
+            return f"[EARLIER SUMMARY]:\n{trimmed_sum}\n\n[RECENT MESSAGES]:\n{recent_text}"
 
         old_text = "\n".join(f"{m['role']}: {m['content']}" for m in to_summarize)
         if fresh_summary:
@@ -584,8 +694,9 @@ Preserve: the user's legal situation, key laws or sections mentioned, and any ad
             .or_(f"summary_upto.is.null,summary_upto.lte.{fresh_upto}") \
             .execute()
 
-        recent_text = "\n".join(f"{m['role']}: {m['content']}" for m in recent_msgs)
-        return f"[EARLIER SUMMARY]:\n{new_summary}\n\n[RECENT MESSAGES]:\n{recent_text}"
+        recent_text = _format_history_turns(recent_msgs)
+        trimmed_sum = new_summary[:MAX_HISTORY_MSG_CHARS]
+        return f"[EARLIER SUMMARY]:\n{trimmed_sum}\n\n[RECENT MESSAGES]:\n{recent_text}"
 
 
 # API & AUTH ENDPOINTS
@@ -1008,11 +1119,14 @@ def chat_with_jurix(
         if user is None:
             # Ephemeral guest mode — no Supabase reads or writes
             if body.document_text:
-                active_doc_text = body.document_text[:30000]
+                active_doc_text = body.document_text[:MAX_DOC_CONTEXT_CHARS]
                 active_doc_name = (body.document_name or "Uploaded Document").strip()[:255]
 
             if body.guest_history:
-                history_text = "\n".join(f"{m.role}: {m.content}" for m in body.guest_history)
+                recent_guest = body.guest_history[-MAX_HISTORY_MESSAGES:]
+                history_text = "\n".join(
+                    f"{m.role}: {(m.content or '')[:MAX_HISTORY_MSG_CHARS]}" for m in recent_guest
+                )
             else:
                 history_text = "No previous conversation."
         else:
@@ -1035,10 +1149,10 @@ def chat_with_jurix(
                 session_data = res.data[0]
 
             if body.document_text:
-                active_doc_text = body.document_text[:30000]
+                active_doc_text = body.document_text[:MAX_DOC_CONTEXT_CHARS]
                 active_doc_name = (body.document_name or "Uploaded Document").strip()[:255]
             elif session_data and session_data.get("document_text"):
-                active_doc_text = session_data["document_text"]
+                active_doc_text = session_data["document_text"][:MAX_DOC_CONTEXT_CHARS]
                 active_doc_name = session_data.get("document_name") or "Uploaded Document"
 
             if not session_data:
@@ -1067,28 +1181,38 @@ def chat_with_jurix(
 
             history_text = get_history_for_prompt(session_id)
 
-        # RAG: fetch relevant legal knowledge from ChromaDB
-        current_db = getattr(app.state, "db", None) or db
-        if current_db is None:
-            raise HTTPException(status_code=503, detail="Vector store not initialized")
-        results = current_db.similarity_search(user_msg, k=5)
-        context_text = "\n\n".join([doc.page_content for doc in results])
+        # Check if query is small talk without an active document
+        is_small_talk_mode = is_small_talk(user_msg) and not active_doc_text
 
         safe_history = sanitize_prompt_tags(history_text)
-        safe_context = sanitize_prompt_tags(context_text)
         safe_user_msg = sanitize_prompt_tags(user_msg)
 
-        doc_section = ""
-        if active_doc_text:
-            safe_doc = sanitize_prompt_tags(active_doc_text)
-            safe_doc_name = sanitize_prompt_tags(active_doc_name or "Uploaded Document")
-            doc_section = (
-                f"\n\nUSER UPLOADED DOCUMENT ({safe_doc_name}):\n"
-                f"<uploaded_document>\n{safe_doc}\n</uploaded_document>"
-            )
+        if is_small_talk_mode:
+            # Skip ChromaDB RAG retrieval completely for greetings / acknowledgements
+            prompt = build_small_talk_prompt(safe_user_msg, safe_history)
+        else:
+            # RAG: fetch relevant legal knowledge from ChromaDB capped at RAG_TOP_K & MAX_RAG_CONTEXT_CHARS
+            current_db = getattr(app.state, "db", None) or db
+            if current_db is None:
+                raise HTTPException(status_code=503, detail="Vector store not initialized")
+            results = current_db.similarity_search(user_msg, k=RAG_TOP_K)
+            context_text = "\n\n".join([doc.page_content for doc in results])
+            if len(context_text) > MAX_RAG_CONTEXT_CHARS:
+                context_text = context_text[:MAX_RAG_CONTEXT_CHARS]
 
-        #promt to gemini
-        prompt = f"""
+            safe_context = sanitize_prompt_tags(context_text)
+
+            doc_section = ""
+            if active_doc_text:
+                safe_doc = sanitize_prompt_tags(active_doc_text)
+                safe_doc_name = sanitize_prompt_tags(active_doc_name or "Uploaded Document")
+                doc_section = (
+                    f"\n\nUSER UPLOADED DOCUMENT ({safe_doc_name}):\n"
+                    f"<uploaded_document>\n{safe_doc}\n</uploaded_document>"
+                )
+
+            #promt to gemini
+            prompt = f"""
 You are JurixAI — a calm, deeply knowledgeable, and compassionate Indian Legal Saathi.
 You are NOT a cold legal encyclopedia. You are the user's trusted friend who happens to know Indian Law inside out.
 Your responses MUST be grounded in Indian Law (IPC/BNS, CrPC/BNSS, Constitution, Consumer Protection, POSH, RTI, IT Act, Domestic Violence Act, Tenancy Act, etc.).
@@ -1195,7 +1319,15 @@ USER'S MESSAGE:
 <user_message>
 {safe_user_msg}
 </user_message>{doc_section}
-        """
+"""
+
+        logger.info(
+            "Chat prompt constructed: prompt_len=%d (is_small_talk=%s, doc_present=%s, history_len=%d)",
+            len(prompt),
+            is_small_talk_mode,
+            bool(active_doc_text),
+            len(history_text),
+        )
 
         reply = invoke_gemini(prompt)
 
