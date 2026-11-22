@@ -27,6 +27,7 @@ class TestUploadSafety(unittest.TestCase):
     def setUp(self):
         backend.limiter.reset()
         backend._user_rate_buckets.clear()
+        backend.reset_global_daily_counter()
 
     def test_oversized_file_content_length_returns_413(self):
         """Content-Length exceeding MAX_UPLOAD_MB must immediately return 413 without loading body."""

@@ -13,6 +13,7 @@ class TestAuthAndAbuse(unittest.TestCase):
     def setUp(self):
         limiter.reset()
         backend._user_rate_buckets.clear()
+        backend.reset_global_daily_counter()
         self.client = TestClient(app)
 
     def test_signup_short_password_returns_422(self):
@@ -201,44 +202,129 @@ class TestAuthAndAbuse(unittest.TestCase):
         self.assertIn("Invalid or expired token", resp_upload.json()["detail"])
 
     def test_tighter_guest_rate_limits(self):
-        """Unauthenticated guests have 5 req/min cap on /upload and 12 req/min cap on /chat."""
-        # /upload guest cap: 5 allowed, 6th rejected with 429
+        """Unauthenticated guests have 3 req/hour cap on /upload and 5 req/10min cap on /chat."""
+        # /upload guest cap: 3 allowed, 4th rejected with 429
         with patch("backend.extract_document_text_sync", return_value=("Doc text", False)):
-            for i in range(5):
+            for i in range(3):
                 resp = self.client.post(
                     "/upload",
                     files={"file": ("test.pdf", b"%PDF-1.4 sample", "application/pdf")}
                 )
                 self.assertEqual(resp.status_code, 200, f"Guest upload {i+1} failed: {resp.text}")
 
-            resp_upload_6 = self.client.post(
+            resp_upload_4 = self.client.post(
                 "/upload",
                 files={"file": ("test.pdf", b"%PDF-1.4 sample", "application/pdf")}
             )
-            self.assertEqual(resp_upload_6.status_code, 429)
-            self.assertIn("Rate limit exceeded (5 requests per 60s)", resp_upload_6.json()["detail"])
+            self.assertEqual(resp_upload_4.status_code, 429)
+            self.assertIn("Guest limit reached", resp_upload_4.json()["detail"])
 
         # Reset rate limiter for chat test
         limiter.reset()
         backend._user_rate_buckets.clear()
+        backend.reset_global_daily_counter()
 
-        # /chat guest cap: 12 allowed, 13th rejected with 429
+        # /chat guest cap: 5 allowed (GUEST_CHAT_PER_10MIN), 6th rejected with 429
         with patch("backend.invoke_gemini", return_value="Reply"):
             app.state.db = MagicMock()
             app.state.db.similarity_search.return_value = []
-            for i in range(12):
+            for i in range(5):
                 resp = self.client.post(
                     "/chat",
                     json={"message": f"Question {i+1}"}
                 )
                 self.assertEqual(resp.status_code, 200, f"Guest chat {i+1} failed: {resp.text}")
 
-            resp_chat_13 = self.client.post(
+            resp_chat_6 = self.client.post(
                 "/chat",
-                json={"message": "Question 13"}
+                json={"message": "Question 6"}
             )
-            self.assertEqual(resp_chat_13.status_code, 429)
-            self.assertIn("Rate limit exceeded (12 requests per 60s)", resp_chat_13.json()["detail"])
+            self.assertEqual(resp_chat_6.status_code, 429)
+            self.assertIn("Guest limit reached. Please sign in for higher limits or try again later.", resp_chat_6.json()["detail"])
+
+    def test_global_daily_kill_switch_blocks_chat_without_invoking_gemini(self):
+        """When MAX_GLOBAL_DAILY_REQUESTS is reached, /chat returns 429 and invoke_gemini is never called."""
+        with patch("backend.MAX_GLOBAL_DAILY_REQUESTS", 2), \
+             patch("backend.invoke_gemini", return_value="AI Reply") as mock_gemini:
+            app.state.db = MagicMock()
+            app.state.db.similarity_search.return_value = []
+
+            # 1st request succeeds
+            r1 = self.client.post("/chat", json={"message": "Question 1"})
+            self.assertEqual(r1.status_code, 200)
+            self.assertEqual(mock_gemini.call_count, 1)
+
+            # 2nd request succeeds
+            r2 = self.client.post("/chat", json={"message": "Question 2"})
+            self.assertEqual(r2.status_code, 200)
+            self.assertEqual(mock_gemini.call_count, 2)
+
+            # 3rd request hits global limit (2) and must immediately return 429
+            r3 = self.client.post("/chat", json={"message": "Question 3"})
+            self.assertEqual(r3.status_code, 429)
+            self.assertIn(
+                "JurixAI has reached its free daily usage limit due to high traffic. Please try again tomorrow.",
+                r3.json()["detail"],
+            )
+            # Crucial verification: invoke_gemini was NOT called for the blocked request
+            self.assertEqual(mock_gemini.call_count, 2)
+
+    def test_global_daily_counter_resets_on_utc_date_rollover(self):
+        """Global daily counter automatically resets when the UTC date advances."""
+        from datetime import timedelta
+        yesterday = backend._global_daily_date - timedelta(days=1)
+        backend.reset_global_daily_counter(count=500, date=yesterday)
+
+        with patch("backend.MAX_GLOBAL_DAILY_REQUESTS", 250), \
+             patch("backend.invoke_gemini", return_value="AI Reply"):
+            app.state.db = MagicMock()
+            app.state.db.similarity_search.return_value = []
+
+            resp = self.client.post("/chat", json={"message": "Question on new day"})
+            self.assertEqual(resp.status_code, 200)
+            self.assertEqual(backend._global_daily_count, 1)
+
+    def test_guest_message_length_limit(self):
+        """Guest messages > 1500 chars are rejected with 400, while authenticated users can send up to 4000."""
+        with patch("backend.invoke_gemini", return_value="AI Reply"):
+            app.state.db = MagicMock()
+            app.state.db.similarity_search.return_value = []
+
+            # Guest sending exactly 1500 characters succeeds
+            resp_ok = self.client.post("/chat", json={"message": "A" * 1500})
+            self.assertEqual(resp_ok.status_code, 200)
+
+            # Guest sending 1501 characters is rejected with 400
+            resp_too_long = self.client.post("/chat", json={"message": "A" * 1501})
+            self.assertIn(resp_too_long.status_code, (400, 422))
+            self.assertIn("Guest messages cannot exceed 1500 characters", resp_too_long.json()["detail"])
+
+        # Authenticated user can send message > 1500 chars (up to MAX_MESSAGE_CHARS=4000)
+        mock_user = MagicMock()
+        mock_user.id = "00000000-0000-0000-0000-000000000001"
+        mock_user.email = "authed@example.com"
+        app.dependency_overrides[backend.get_current_user] = lambda: mock_user
+        try:
+            with patch("backend.supabase.table") as mock_table, \
+                 patch("backend.invoke_gemini", return_value="AI Reply"):
+                mock_table.return_value.insert.return_value.execute.return_value.data = [{"id": "new-sess-1"}]
+                mock_table.return_value.select.return_value.eq.return_value.order.return_value.limit.return_value.execute.return_value.data = []
+                app.state.db = MagicMock()
+                app.state.db.similarity_search.return_value = []
+
+                resp_auth = self.client.post(
+                    "/chat",
+                    headers={"Authorization": "Bearer valid-token"},
+                    json={"message": "A" * 2000}
+                )
+                self.assertEqual(resp_auth.status_code, 200)
+        finally:
+            app.dependency_overrides.pop(backend.get_current_user, None)
+
+    def test_gemini_model_max_output_tokens(self):
+        """get_gemini_model configures max_output_tokens from GEMINI_MAX_OUTPUT_TOKENS."""
+        model = backend.get_gemini_model("gemini-2.5-flash")
+        self.assertEqual(model.max_output_tokens, backend.GEMINI_MAX_OUTPUT_TOKENS)
 
     def test_sessions_strictly_protected_for_guests(self):
         """GET /sessions without token returns 401/403, guest cannot view sessions."""

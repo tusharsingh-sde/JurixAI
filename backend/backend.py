@@ -86,6 +86,36 @@ try:
 except ValueError:
     MAX_MESSAGE_CHARS = 4000
 
+try:
+    MAX_GUEST_MESSAGE_CHARS = int(os.getenv("MAX_GUEST_MESSAGE_CHARS", "1500"))
+except ValueError:
+    MAX_GUEST_MESSAGE_CHARS = 1500
+
+try:
+    MAX_GLOBAL_DAILY_REQUESTS = int(os.getenv("MAX_GLOBAL_DAILY_REQUESTS", "250"))
+except ValueError:
+    MAX_GLOBAL_DAILY_REQUESTS = 250
+
+try:
+    GUEST_CHAT_PER_10MIN = int(os.getenv("GUEST_CHAT_PER_10MIN", "5"))
+except ValueError:
+    GUEST_CHAT_PER_10MIN = 5
+
+try:
+    GUEST_CHAT_PER_DAY = int(os.getenv("GUEST_CHAT_PER_DAY", "15"))
+except ValueError:
+    GUEST_CHAT_PER_DAY = 15
+
+try:
+    GUEST_UPLOAD_PER_HOUR = int(os.getenv("GUEST_UPLOAD_PER_HOUR", "3"))
+except ValueError:
+    GUEST_UPLOAD_PER_HOUR = 3
+
+try:
+    GEMINI_MAX_OUTPUT_TOKENS = int(os.getenv("GEMINI_MAX_OUTPUT_TOKENS", "1024"))
+except ValueError:
+    GEMINI_MAX_OUTPUT_TOKENS = 1024
+
 CHROMA_DIR = os.getenv("CHROMA_DIR", "./Jurixai_db")
 FORWARDED_ALLOW_IPS = os.getenv("FORWARDED_ALLOW_IPS", "127.0.0.1")
 
@@ -148,8 +178,8 @@ async def lifespan(app: FastAPI):
         db._collection.count(),
     )
     logger.info(
-        "JurixAI started with settings: models=%s, allowed_origins_count=%d, max_upload_mb=%d, max_message_chars=%d, chroma_dir=%s",
-        GEMINI_MODELS, len(ALLOWED_ORIGINS), MAX_UPLOAD_MB, MAX_MESSAGE_CHARS, CHROMA_DIR,
+        "JurixAI started with settings: models=%s, allowed_origins_count=%d, max_upload_mb=%d, max_message_chars=%d, max_guest_chars=%d, max_global_daily=%d, chroma_dir=%s",
+        GEMINI_MODELS, len(ALLOWED_ORIGINS), MAX_UPLOAD_MB, MAX_MESSAGE_CHARS, MAX_GUEST_MESSAGE_CHARS, MAX_GLOBAL_DAILY_REQUESTS, CHROMA_DIR,
     )
     port_env = os.getenv("PORT")
     if port_env and FORWARDED_ALLOW_IPS == "127.0.0.1":
@@ -188,8 +218,14 @@ MAX_TRACKED_RATE_KEYS = 5000
 _user_rate_buckets: dict[str, deque[float]] = {}
 _user_rate_lock = threading.Lock()
 
-def enforce_user_rate_limit(user_id: str, scope: str, limit: int, window_seconds: int = 60) -> None:
-    """Enforce a thread-safe, bounded per-user rate limit keyed on verified Supabase user.id."""
+def enforce_user_rate_limit(
+    user_id: str,
+    scope: str,
+    limit: int,
+    window_seconds: int = 60,
+    detail: Optional[str] = None,
+) -> None:
+    """Enforce a thread-safe, bounded per-user/per-guest rate limit."""
     now = time.monotonic()
     cutoff = now - window_seconds
     key = f"{scope}:{user_id}"
@@ -214,12 +250,50 @@ def enforce_user_rate_limit(user_id: str, scope: str, limit: int, window_seconds
             bucket.popleft()
 
         if len(bucket) >= limit:
+            msg = detail or f"Rate limit exceeded ({limit} requests per {window_seconds}s). Please wait and try again."
             raise HTTPException(
                 status_code=429,
-                detail=f"Rate limit exceeded ({limit} requests per {window_seconds}s). Please wait and try again.",
+                detail=msg,
             )
 
         bucket.append(now)
+
+# Thread-safe in-memory global daily chat request counter
+_global_daily_lock = threading.Lock()
+_global_daily_count = 0
+_global_daily_date = datetime.now(timezone.utc).date()
+
+def reset_global_daily_counter(count: int = 0, date=None) -> None:
+    """Helper to reset global daily counter (useful in tests and date rollover)."""
+    global _global_daily_count, _global_daily_date
+    with _global_daily_lock:
+        _global_daily_count = count
+        _global_daily_date = date if date is not None else datetime.now(timezone.utc).date()
+
+def check_and_increment_global_daily_counter() -> None:
+    """
+    Thread-safe check and increment for global daily chat request limit.
+    Controlled by MAX_GLOBAL_DAILY_REQUESTS (default: 250; 0 disables the cap).
+    Auto-resets on UTC date rollover.
+    Raises HTTPException(429) if limit is reached.
+    """
+    global _global_daily_count, _global_daily_date
+    limit = MAX_GLOBAL_DAILY_REQUESTS
+    if limit <= 0:
+        return
+
+    today = datetime.now(timezone.utc).date()
+    with _global_daily_lock:
+        if today != _global_daily_date:
+            _global_daily_date = today
+            _global_daily_count = 0
+
+        if _global_daily_count >= limit:
+            raise HTTPException(
+                status_code=429,
+                detail="JurixAI has reached its free daily usage limit due to high traffic. Please try again tomorrow.",
+            )
+        _global_daily_count += 1
 
 def sanitize_prompt_tags(text: str) -> str:
     """Escape < and > characters to prevent delimiter breakout and prompt injection."""
@@ -271,13 +345,14 @@ _model_cache_lock = threading.Lock()
 
 def get_gemini_model(model_name: str, timeout: float = 30.0) -> ChatGoogleGenerativeAI:
     """Return a cached ChatGoogleGenerativeAI instance safely across worker threads."""
-    cache_key = f"{model_name}_{timeout}"
+    cache_key = f"{model_name}_{timeout}_{GEMINI_MAX_OUTPUT_TOKENS}"
     with _model_cache_lock:
         if cache_key not in _model_cache:
             _model_cache[cache_key] = ChatGoogleGenerativeAI(
                 model=model_name,
                 google_api_key=GEMINI_API_KEY,
                 temperature=0.3,
+                max_output_tokens=GEMINI_MAX_OUTPUT_TOKENS,
                 max_retries=0,
                 timeout=timeout,
             )
@@ -790,7 +865,14 @@ async def process_document(
     if user is not None:
         enforce_user_rate_limit(str(user.id), scope="upload", limit=10, window_seconds=60)
     else:
-        enforce_user_rate_limit(f"guest:{get_real_ip(request)}", scope="upload", limit=5, window_seconds=60)
+        client_ip = get_real_ip(request)
+        enforce_user_rate_limit(
+            f"guest:{client_ip}",
+            scope="guest_upload_hour",
+            limit=GUEST_UPLOAD_PER_HOUR,
+            window_seconds=3600,
+            detail="Guest limit reached. Please sign in for higher limits or try again later.",
+        )
     try:
         max_upload_bytes = MAX_UPLOAD_MB * 1024 * 1024
 
@@ -893,7 +975,29 @@ def chat_with_jurix(
     if user is not None:
         enforce_user_rate_limit(str(user.id), scope="chat", limit=30, window_seconds=60)
     else:
-        enforce_user_rate_limit(f"guest:{get_real_ip(request)}", scope="chat", limit=12, window_seconds=60)
+        client_ip = get_real_ip(request)
+        enforce_user_rate_limit(
+            f"guest:{client_ip}",
+            scope="guest_chat_10min",
+            limit=GUEST_CHAT_PER_10MIN,
+            window_seconds=600,
+            detail="Guest limit reached. Please sign in for higher limits or try again later.",
+        )
+        enforce_user_rate_limit(
+            f"guest:{client_ip}",
+            scope="guest_chat_day",
+            limit=GUEST_CHAT_PER_DAY,
+            window_seconds=86400,
+            detail="Guest limit reached. Please sign in for higher limits or try again later.",
+        )
+        if len(body.message) > MAX_GUEST_MESSAGE_CHARS:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Guest messages cannot exceed {MAX_GUEST_MESSAGE_CHARS} characters. Please sign in for longer messages.",
+            )
+
+    # Check global daily kill-switch before calling Chroma/Gemini
+    check_and_increment_global_daily_counter()
 
     try:
         user_msg = body.message

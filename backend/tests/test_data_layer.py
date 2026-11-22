@@ -21,6 +21,11 @@ class TestDataLayer(unittest.TestCase):
     def tearDownClass(cls):
         app.dependency_overrides.clear()
 
+    def setUp(self):
+        backend.limiter.reset()
+        backend._user_rate_buckets.clear()
+        backend.reset_global_daily_counter()
+
     def test_delete_session_404_when_missing(self):
         """delete_session returns 404 when no session matched."""
         with patch("backend.supabase.table") as mock_table:
