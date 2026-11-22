@@ -1249,6 +1249,115 @@ button:focus-visible, input:focus-visible {
   50% { box-shadow: 0 0 0 8px rgba(255, 255, 255, 0); }
 }
 
+/* =========================================================
+   GUEST MODE UI (Sidebar Card, Topbar CTA, Non-Intrusive Nudge)
+   ========================================================= */
+.topbar-signin-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 36px;
+  padding: 0 18px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.38);
+  background: linear-gradient(105deg, rgba(43, 141, 255, 0.9), rgba(22, 101, 232, 0.92));
+  color: #ffffff;
+  font-size: 12.5px;
+  font-weight: 600;
+  cursor: pointer;
+  box-shadow: 0 6px 18px rgba(14, 72, 200, 0.4);
+  transition: transform 0.16s, box-shadow 0.16s;
+}
+
+.topbar-signin-btn:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 8px 22px rgba(14, 72, 200, 0.58);
+}
+
+.guest-sidebar-card {
+  margin-top: 6px;
+  padding: 16px 14px;
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.07);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.guest-card-badge {
+  align-self: flex-start;
+  padding: 3px 8px;
+  border-radius: 999px;
+  font-size: 9.5px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  color: #9dc2ff;
+  background: rgba(43, 141, 255, 0.2);
+  border: 1px solid rgba(120, 178, 255, 0.3);
+}
+
+.guest-sidebar-card strong {
+  font-size: 14px;
+  color: #ffffff;
+}
+
+.guest-sidebar-card p {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.55;
+  color: rgba(210, 218, 255, 0.8);
+}
+
+.guest-signin-cta {
+  margin-top: 6px;
+  height: 38px;
+  border: 0;
+  border-radius: 9px;
+  background: linear-gradient(105deg, #2b8dff 0%, #1665e8 100%);
+  color: #ffffff;
+  font-size: 12.5px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: transform 0.15s, box-shadow 0.15s;
+}
+
+.guest-signin-cta:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 6px 18px rgba(22, 101, 232, 0.5);
+}
+
+.guest-nudge-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 7px 14px;
+  margin-bottom: 8px;
+  border-radius: 10px;
+  background: rgba(13, 18, 98, 0.52);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  backdrop-filter: blur(12px);
+  font-size: 11.5px;
+  color: rgba(216, 224, 255, 0.86);
+}
+
+.guest-nudge-bar button {
+  border: 0;
+  background: transparent;
+  padding: 0;
+  color: #7ebdff;
+  font-weight: 700;
+  font-size: 11.5px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.guest-nudge-bar button:hover {
+  text-decoration: underline;
+  color: #b4d8ff;
+}
+
 @media (max-width: 900px) {
   .hero-content {
     padding-left: 28px;

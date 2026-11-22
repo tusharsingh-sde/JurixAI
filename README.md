@@ -11,7 +11,7 @@
 [![LangChain](https://img.shields.io/badge/LangChain-Chroma-1C3C3C?style=for-the-badge&logo=langchain&logoColor=white)](https://langchain.com)
 [![Google Gemini](https://img.shields.io/badge/Google_Gemini-2.5_Flash-4285F4?style=for-the-badge&logo=google&logoColor=white)](https://ai.google.dev)
 [![Supabase](https://img.shields.io/badge/Supabase-Auth_%26_DB-3ECF8E?style=for-the-badge&logo=supabase&logoColor=white)](https://supabase.com)
-[![Pytest](https://img.shields.io/badge/Pytest-22_Passed-0A9EDC?style=for-the-badge&logo=pytest&logoColor=white)](https://docs.pytest.org)
+[![Pytest](https://img.shields.io/badge/Pytest-27_Passed-0A9EDC?style=for-the-badge&logo=pytest&logoColor=white)](https://docs.pytest.org)
 [![License](https://img.shields.io/badge/License-MIT-yellow?style=for-the-badge)](LICENSE)
 
 **JurixAI** is a production-hardened, **RAG-based** (Retrieval-Augmented Generation) legal intelligence assistant purpose-built for the **Indian Legal System**. It goes beyond cold legal summaries — acting as a trusted *Legal Saathi* that understands distress and delivers authoritative, law-backed guidance with empathy and clarity.
@@ -269,18 +269,23 @@ docker run -p 8000:8000 --env-file backend/.env jurixai-backend
 - **`DELETE /sessions/{id}`**: Delete a session and its associated message history.
 
 ### Core RAG Chat
-- **`POST /chat`** (Limit: `30/minute/user`):
+- **`POST /chat`** (Limit: `30/minute/user` for authed users, `12/minute/IP` for unauthenticated guests):
   ```json
   {
     "message": "What is the penalty for cyber fraud?",
     "session_id": "optional-uuid-here",
-    "document_text": "optional extracted legal document text"
+    "document_text": "optional extracted legal document text",
+    "document_name": "optional-filename.pdf",
+    "guest_history": [
+      {"role": "User", "content": "Previous question"},
+      {"role": "JurixAI", "content": "Previous answer"}
+    ]
   }
   ```
-  Returns law-grounded response with empathetic guidance, legal sections, and action steps. Automatically persists document text on the session across follow-up queries.
+  Returns law-grounded response with empathetic guidance, legal sections, and action steps. Automatically persists document text and conversation history for authenticated users. For guest users, operates entirely in-memory with zero database writes.
 
 ### Document Upload & OCR
-- **`POST /upload`** (Limit: `10/minute/user`):
+- **`POST /upload`** (Limit: `10/minute/user` for authed users, `5/minute/IP` for unauthenticated guests):
   - Enforces `MAX_UPLOAD_MB` (default 8MB) with early chunked 413 abort.
   - Verifies magic byte headers (`%PDF`, PNG, JPEG).
   - Decompression bomb protection (25M pixel limit).
@@ -292,7 +297,7 @@ docker run -p 8000:8000 --env-file backend/.env jurixai-backend
 
 ## 🧪 Testing & Verification
 
-The backend includes a comprehensive pytest suite with 22 unit tests covering auth, upload security, rate limiting, and database operations with mocked services:
+The backend includes a comprehensive pytest suite with 27 unit tests covering guest mode, auth, upload security, rate limiting, and database operations with mocked services:
 
 ```bash
 cd backend
@@ -302,10 +307,15 @@ python -m pytest tests/ -v
 ```text
 tests/test_auth_and_abuse.py::test_signup_rate_limit PASSED
 tests/test_auth_and_abuse.py::test_short_password_rejected PASSED
+tests/test_auth_and_abuse.py::test_guest_chat_works_without_db_writes PASSED
+tests/test_auth_and_abuse.py::test_guest_followup_and_doc_context_injected_safely PASSED
+tests/test_auth_and_abuse.py::test_invalid_or_stale_token_strictly_returns_401 PASSED
+tests/test_auth_and_abuse.py::test_tighter_guest_rate_limits PASSED
+tests/test_auth_and_abuse.py::test_sessions_strictly_protected_for_guests PASSED
 tests/test_data_layer.py::test_document_persistence_across_followups PASSED
 tests/test_upload_safety.py::test_magic_byte_validation PASSED
 ...
-====================== 22 passed in 7.41s ======================
+====================== 27 passed in 4.97s ======================
 ```
 
 ---

@@ -1,7 +1,7 @@
 import os
 import uuid
 import logging
-from typing import Optional
+from typing import Optional, Literal
 from dotenv import load_dotenv
 import re
 import hashlib
@@ -59,7 +59,9 @@ if missing_configs:
         "Please set these in your environment or .env file before starting the application."
     )
 
-os.environ["GOOGLE_API_KEY"] = GEMINI_API_KEY
+# Only set GOOGLE_API_KEY in environment if not already configured via GEMINI_API_KEY
+if "GOOGLE_API_KEY" not in os.environ and not os.getenv("GEMINI_API_KEY"):
+    os.environ["GOOGLE_API_KEY"] = GEMINI_API_KEY
 
 ALLOWED_ORIGINS_RAW = os.getenv("ALLOWED_ORIGINS", "")
 ALLOWED_ORIGINS = [
@@ -71,7 +73,7 @@ ALLOWED_ORIGINS = [
     "http://127.0.0.1:3000",
 ]
 
-GEMINI_MODELS_RAW = os.getenv("GEMINI_MODELS", "gemini-2.5-flash,gemini-2.5-flash-lite,gemini-2.0-flash")
+GEMINI_MODELS_RAW = os.getenv("GEMINI_MODELS", "gemini-2.5-flash,gemini-3.5-flash-lite,gemini-3.8-flash")
 GEMINI_MODELS = [m.strip() for m in GEMINI_MODELS_RAW.split(",") if m.strip()]
 
 try:
@@ -274,7 +276,9 @@ def get_gemini_model(model_name: str, timeout: float = 30.0) -> ChatGoogleGenera
         if cache_key not in _model_cache:
             _model_cache[cache_key] = ChatGoogleGenerativeAI(
                 model=model_name,
-                max_retries=2,
+                google_api_key=GEMINI_API_KEY,
+                temperature=0.3,
+                max_retries=0,
                 timeout=timeout,
             )
         return _model_cache[cache_key]
@@ -323,11 +327,16 @@ class AuthRequest(BaseModel):
     def normalize_email(cls, v: str) -> str:
         return v.strip().lower()
 
+class GuestMessage(BaseModel):
+    role: Literal["User", "JurixAI"]
+    content: str = Field(..., min_length=1, max_length=MAX_MESSAGE_CHARS)
+
 class UserRequest(BaseModel):
     message: str = Field(..., min_length=1, max_length=MAX_MESSAGE_CHARS)
     document_text: Optional[str] = Field(default=None, max_length=30000)
     document_name: Optional[str] = Field(default=None, max_length=255)
     session_id: Optional[str] = None
+    guest_history: Optional[list[GuestMessage]] = Field(default=None, max_length=6)
 
 class NewSessionRequest(BaseModel):
     title: Optional[str] = "New Conversation"
@@ -346,6 +355,22 @@ def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(securit
         return user_response.user
     except Exception:
         raise HTTPException(status_code=401, detail="Invalid or expired token. Please log in again.")
+
+optional_security = HTTPBearer(auto_error=False)
+
+def get_optional_user(
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(optional_security),
+):
+    """
+    Allow unauthenticated guest access when no Authorization header is sent.
+    If a Bearer token IS sent, strictly validate it (invalid/expired tokens still return 401).
+    """
+    override = app.dependency_overrides.get(get_current_user)
+    if override:
+        return override()
+    if credentials is None:
+        return None
+    return get_current_user(credentials)
 
 # History Helper — rolling summary with database caching and monotonic concurrency safety
 MAX_VERBATIM = 10        # Last N messages sent as-is
@@ -756,9 +781,16 @@ def extract_document_text_sync(filename: str, content: bytes) -> tuple[str, bool
 
 @app.post("/upload")
 @limiter.limit("20/minute")
-async def process_document(request: Request, file: UploadFile = File(...), user=Depends(get_current_user)):
-    """Upload a PDF or image document and extract its text content safely."""
-    enforce_user_rate_limit(str(user.id), scope="upload", limit=10, window_seconds=60)
+async def process_document(
+    request: Request,
+    file: UploadFile = File(...),
+    user=Depends(get_optional_user),
+):
+    """Upload a PDF or image document and extract its text content safely (supports guests & signed-in users)."""
+    if user is not None:
+        enforce_user_rate_limit(str(user.id), scope="upload", limit=10, window_seconds=60)
+    else:
+        enforce_user_rate_limit(f"guest:{get_real_ip(request)}", scope="upload", limit=5, window_seconds=60)
     try:
         max_upload_bytes = MAX_UPLOAD_MB * 1024 * 1024
 
@@ -848,69 +880,88 @@ async def process_document(request: Request, file: UploadFile = File(...), user=
 
 @app.post("/chat")
 @limiter.limit("60/minute")
-def chat_with_jurix(request: Request, body: UserRequest, user=Depends(get_current_user)):
+def chat_with_jurix(
+    request: Request,
+    body: UserRequest,
+    user=Depends(get_optional_user),
+):
     """
-    Main chat endpoint. Requires an authenticated user and a valid session_id.
-    Saves all messages to Supabase with full history context.
+    Main chat endpoint.
+    - Authenticated users: persists sessions, messages, document context, and rolling summaries in Supabase.
+    - Guest users: ephemeral RAG + document Q&A with tighter IP rate limits and zero database writes.
     """
-    enforce_user_rate_limit(str(user.id), scope="chat", limit=30, window_seconds=60)
+    if user is not None:
+        enforce_user_rate_limit(str(user.id), scope="chat", limit=30, window_seconds=60)
+    else:
+        enforce_user_rate_limit(f"guest:{get_real_ip(request)}", scope="chat", limit=12, window_seconds=60)
+
     try:
-        session_id = body.session_id
         user_msg = body.message
-
-        session_data = None
-        if session_id and session_id != "string":
-            try:
-                uuid.UUID(str(session_id))
-            except ValueError:
-                raise HTTPException(status_code=400, detail="Invalid session_id format.")
-
-            res = supabase.table("sessions") \
-                .select("id, title, document_text, document_name") \
-                .eq("id", session_id) \
-                .eq("user_id", str(user.id)) \
-                .execute()
-            if not res.data:
-                raise HTTPException(status_code=404, detail="Session not found.")
-            session_data = res.data[0]
-
-        # Determine active document text & name (request override or persistent session document)
+        session_id = None
         active_doc_text = None
         active_doc_name = None
-        if body.document_text:
-            active_doc_text = body.document_text[:30000]
-            active_doc_name = (body.document_name or "Uploaded Document").strip()[:255]
-        elif session_data and session_data.get("document_text"):
-            active_doc_text = session_data["document_text"]
-            active_doc_name = session_data.get("document_name") or "Uploaded Document"
 
-        # If no valid existing session, auto-create one for this user
-        if not session_data:
-            short_title = user_msg[:50] + ("..." if len(user_msg) > 50 else "")
-            new_session_payload = {
-                "user_id": str(user.id),
-                "title": short_title,
-            }
-            if active_doc_text:
-                new_session_payload["document_text"] = active_doc_text
-                new_session_payload["document_name"] = active_doc_name
-            new_session = supabase.table("sessions").insert(new_session_payload).execute()
-            session_id = new_session.data[0]["id"]
-        else:
-            update_payload = {}
-            if session_data.get("title") == "New Conversation":
-                update_payload["title"] = user_msg[:50] + ("..." if len(user_msg) > 50 else "")
+        if user is None:
+            # Ephemeral guest mode — no Supabase reads or writes
             if body.document_text:
-                update_payload["document_text"] = active_doc_text
-                update_payload["document_name"] = active_doc_name
-            if update_payload:
-                supabase.table("sessions") \
-                    .update(update_payload) \
-                    .eq("id", session_id) \
-                    .execute()
+                active_doc_text = body.document_text[:30000]
+                active_doc_name = (body.document_name or "Uploaded Document").strip()[:255]
 
-        # Build conversation history context
-        history_text = get_history_for_prompt(session_id)
+            if body.guest_history:
+                history_text = "\n".join(f"{m.role}: {m.content}" for m in body.guest_history)
+            else:
+                history_text = "No previous conversation."
+        else:
+            # Authenticated mode — full Supabase persistence
+            session_id = body.session_id
+            session_data = None
+            if session_id and session_id != "string":
+                try:
+                    uuid.UUID(str(session_id))
+                except ValueError:
+                    raise HTTPException(status_code=400, detail="Invalid session_id format.")
+
+                res = supabase.table("sessions") \
+                    .select("id, title, document_text, document_name") \
+                    .eq("id", session_id) \
+                    .eq("user_id", str(user.id)) \
+                    .execute()
+                if not res.data:
+                    raise HTTPException(status_code=404, detail="Session not found.")
+                session_data = res.data[0]
+
+            if body.document_text:
+                active_doc_text = body.document_text[:30000]
+                active_doc_name = (body.document_name or "Uploaded Document").strip()[:255]
+            elif session_data and session_data.get("document_text"):
+                active_doc_text = session_data["document_text"]
+                active_doc_name = session_data.get("document_name") or "Uploaded Document"
+
+            if not session_data:
+                short_title = user_msg[:50] + ("..." if len(user_msg) > 50 else "")
+                new_session_payload = {
+                    "user_id": str(user.id),
+                    "title": short_title,
+                }
+                if active_doc_text:
+                    new_session_payload["document_text"] = active_doc_text
+                    new_session_payload["document_name"] = active_doc_name
+                new_session = supabase.table("sessions").insert(new_session_payload).execute()
+                session_id = new_session.data[0]["id"]
+            else:
+                update_payload = {}
+                if session_data.get("title") == "New Conversation":
+                    update_payload["title"] = user_msg[:50] + ("..." if len(user_msg) > 50 else "")
+                if body.document_text:
+                    update_payload["document_text"] = active_doc_text
+                    update_payload["document_name"] = active_doc_name
+                if update_payload:
+                    supabase.table("sessions") \
+                        .update(update_payload) \
+                        .eq("id", session_id) \
+                        .execute()
+
+            history_text = get_history_for_prompt(session_id)
 
         # RAG: fetch relevant legal knowledge from ChromaDB
         current_db = getattr(app.state, "db", None) or db
@@ -1044,24 +1095,25 @@ USER'S MESSAGE:
 
         reply = invoke_gemini(prompt)
 
-        # Save turns with explicit created_at timestamps ensuring User turn precedes JurixAI
-        now = datetime.now(timezone.utc)
-        user_created_at = (now - timedelta(milliseconds=100)).isoformat()
-        ai_created_at = now.isoformat()
+        # Persist turns ONLY for authenticated users
+        if user is not None and session_id:
+            now = datetime.now(timezone.utc)
+            user_created_at = (now - timedelta(milliseconds=100)).isoformat()
+            ai_created_at = now.isoformat()
 
-        supabase.table("messages").insert([
-            {"session_id": session_id, "role": "User",    "content": user_msg, "created_at": user_created_at},
-            {"session_id": session_id, "role": "JurixAI", "content": reply,    "created_at": ai_created_at}
-        ]).execute()
+            supabase.table("messages").insert([
+                {"session_id": session_id, "role": "User",    "content": user_msg, "created_at": user_created_at},
+                {"session_id": session_id, "role": "JurixAI", "content": reply,    "created_at": ai_created_at},
+            ]).execute()
 
-        # Update session activity timestamp on each message
-        supabase.table("sessions").update({
-            "updated_at": ai_created_at
-        }).eq("id", session_id).execute()
+            supabase.table("sessions").update({
+                "updated_at": ai_created_at
+            }).eq("id", session_id).execute()
 
         return {
             "session_id": session_id,
-            "reply": reply
+            "reply": reply,
+            "guest": user is None,
         }
 
     except HTTPException:

@@ -72,6 +72,7 @@ function App() {
   const [pendingFile, setPendingFile] = useState(null)
   const [listening, setListening] = useState(false)
   const [uploading, setUploading] = useState(false)
+  const [guestDoc, setGuestDoc] = useState(null)
 
   const token = session?.access_token || null
   const email = session?.user?.email || ''
@@ -101,12 +102,15 @@ function App() {
       setAuthReady(true)
     })
 
-    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, nextSession) => {
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((event, nextSession) => {
       setSession(nextSession)
-      if (nextSession) {
+      if (event === 'SIGNED_IN' && nextSession) {
         setAuthOpen(false)
         setOauthBusy('')
         setError('')
+        setGuestDoc(null)
+        setMessages([])
+        setActiveSession(null)
       }
     })
 
@@ -134,7 +138,6 @@ function App() {
   }, [token])
 
   useEffect(() => {
-    if (!token) return
     const onKeyDown = (event) => {
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') {
         event.preventDefault()
@@ -143,7 +146,7 @@ function App() {
     }
     window.addEventListener('keydown', onKeyDown)
     return () => window.removeEventListener('keydown', onKeyDown)
-  }, [token])
+  }, [])
 
   async function loadSessions(activeToken = token) {
     if (!activeToken) return
@@ -175,6 +178,7 @@ function App() {
   function newConversation() {
     setActiveSession(null)
     setMessages([])
+    setGuestDoc(null)
     setDraft('')
     setError('')
     setNotice('')
@@ -257,6 +261,7 @@ function App() {
     setSessions([])
     setActiveSession(null)
     setMessages([])
+    setGuestDoc(null)
   }
 
   async function removeSession(event, session) {
@@ -273,23 +278,31 @@ function App() {
   async function sendMessage(text = draft, activeToken = token, doc = null) {
     const content = text.trim()
     if (!content || busy) return
-    if (!activeToken) {
-      setDraft(content)
-      sessionStorage.setItem('jurixai_pending_prompt', content)
-      setAuthOpen(true)
-      return
-    }
+
+    const isGuest = !activeToken
+    const recentGuestHistory = isGuest
+      ? messages.slice(-6).map((m) => ({
+          role: m.role === 'user' ? 'User' : 'JurixAI',
+          content: (m.content || '').slice(0, 4000),
+        }))
+      : null
+
+    const activeDoc = doc || (isGuest ? guestDoc : null)
+
     setDraft('')
     setError('')
     const userMessage = { id: crypto.randomUUID(), role: 'user', content }
     setMessages((current) => [...current, userMessage])
     setBusy(true)
+
     try {
       const payload = {
-        session_id: activeSession?.id || null,
         message: content,
-        ...(doc?.document_text
-          ? { document_text: doc.document_text, document_name: doc.document_name }
+        ...(isGuest
+          ? { guest_history: recentGuestHistory }
+          : { session_id: activeSession?.id || null }),
+        ...(activeDoc?.document_text
+          ? { document_text: activeDoc.document_text, document_name: activeDoc.document_name }
           : {}),
       }
       const data = await request('/chat', {
@@ -297,14 +310,19 @@ function App() {
         token: activeToken,
         body: JSON.stringify(payload),
       })
-      setMessages((current) => [...current, { id: crypto.randomUUID(), role: 'assistant', content: data.reply }])
-      if (data.session_id && data.session_id !== activeSession?.id) {
-        setActiveSession({
-          id: data.session_id,
-          title: content.length > 50 ? `${content.slice(0, 50)}...` : content,
-        })
+      setMessages((current) => [
+        ...current,
+        { id: crypto.randomUUID(), role: 'assistant', content: data.reply },
+      ])
+      if (!isGuest) {
+        if (data.session_id && data.session_id !== activeSession?.id) {
+          setActiveSession({
+            id: data.session_id,
+            title: content.length > 50 ? `${content.slice(0, 50)}...` : content,
+          })
+        }
+        await loadSessions(activeToken)
       }
-      await loadSessions(activeToken)
     } catch (e) {
       setError(e.message)
       setMessages((current) => current.filter((m) => m.id !== userMessage.id))
@@ -330,11 +348,13 @@ function App() {
       if (data.truncated) {
         setNotice(`"${file.name}" was large — analyzed the first 30,000 characters.`)
       }
+      const docPayload = { document_text: data.extracted_text, document_name: file.name }
+      if (!token) setGuestDoc(docPayload)
       setPendingFile(null)
       await sendMessage(
         `Please review the uploaded document "${file.name}" and explain the key details, risks, deadlines, and what I should do next.`,
         token,
-        { document_text: data.extracted_text, document_name: file.name }
+        docPayload
       )
     } catch (e) {
       setError(e.message)
@@ -375,26 +395,7 @@ function App() {
     )
   }
 
-  if (!token && !authOpen) {
-    return (
-      <HeroLanding
-        onAsk={(prompt) => {
-          setDraft(prompt)
-          sessionStorage.setItem('jurixai_pending_prompt', prompt)
-          setAuthOpen(true)
-        }}
-        onUpload={() => {
-          sessionStorage.setItem('jurixai_pending_upload', '1')
-          setAuthOpen(true)
-        }}
-        onSignIn={() => setAuthOpen(true)}
-        listening={listening}
-        startVoiceInput={startVoiceInput}
-      />
-    )
-  }
-
-  if (!token) {
+  if (authOpen && !token) {
     return (
       <AuthScreen
         authMode={authMode}
@@ -415,6 +416,7 @@ function App() {
   }
 
   const inChat = messages.length > 0
+  const isGuest = !token
 
   return (
     <div className="cobalt-shell">
@@ -439,57 +441,78 @@ function App() {
           <kbd>⌘K</kbd>
         </button>
 
-        <div className="sidebar-section-label">
-          <span>YOUR CONVERSATIONS</span>
-          <span className="count-pill">{sessions.length}</span>
-        </div>
-
-        <div className="session-list">
-          {sessions.map((session) => (
+        {isGuest ? (
+          <div className="guest-sidebar-card">
+            <div className="guest-card-badge">GUEST MODE</div>
+            <strong>Chats aren't saved yet</strong>
+            <p>
+              Try JurixAI freely right now. Sign in with Google, GitHub, or Email to save conversations and sync across devices.
+            </p>
             <button
-              key={session.id}
-              className={`session-item ${activeSession?.id === session.id ? 'selected' : ''}`}
-              onClick={() => openSession(session)}
-              title={session.title}
+              type="button"
+              className="guest-signin-cta"
+              onClick={() => { setSidebarOpen(false); setAuthOpen(true) }}
             >
-              <MessageCircle size={15} />
-              <span className="session-title">{session.title || 'New conversation'}</span>
-              <span
-                className="session-delete"
-                onClick={(event) => removeSession(event, session)}
-                role="button"
-                aria-label="Delete conversation"
-              >
-                <Trash2 size={14} />
-              </span>
+              Sign in to save history
             </button>
-          ))}
-          {sessions.length === 0 && (
-            <p className="empty-sessions">Your legal chats will appear here.</p>
-          )}
-        </div>
+          </div>
+        ) : (
+          <>
+            <div className="sidebar-section-label">
+              <span>YOUR CONVERSATIONS</span>
+              <span className="count-pill">{sessions.length}</span>
+            </div>
+
+            <div className="session-list">
+              {sessions.map((session) => (
+                <button
+                  key={session.id}
+                  className={`session-item ${activeSession?.id === session.id ? 'selected' : ''}`}
+                  onClick={() => openSession(session)}
+                  title={session.title}
+                >
+                  <MessageCircle size={15} />
+                  <span className="session-title">{session.title || 'New conversation'}</span>
+                  <span
+                    className="session-delete"
+                    onClick={(event) => removeSession(event, session)}
+                    role="button"
+                    aria-label="Delete conversation"
+                  >
+                    <Trash2 size={14} />
+                  </span>
+                </button>
+              ))}
+              {sessions.length === 0 && (
+                <p className="empty-sessions">Your legal chats will appear here.</p>
+              )}
+            </div>
+          </>
+        )}
 
         <div className="sidebar-bottom">
           <div className="privacy-note">
             <ShieldCheck size={15} />
-            <span>Private & securely saved</span>
+            <span>{isGuest ? 'Private session' : 'Private & securely saved'}</span>
           </div>
-          <div className="profile-row">
-            <div className="avatar">
-              {avatarUrl ? (
-                <img src={avatarUrl} alt={displayName} className="avatar-img" referrerPolicy="no-referrer" />
-              ) : (
-                displayName.charAt(0).toUpperCase()
-              )}
+          {!isGuest && (
+            <div className="profile-row">
+              <div className="avatar">
+                {avatarUrl ? (
+                  <img src={avatarUrl} alt={displayName} className="avatar-img" referrerPolicy="no-referrer" />
+                ) : (
+                  displayName.charAt(0).toUpperCase()
+                )}
+              </div>
+              <div className="profile-info">
+                <strong>{displayName}</strong>
+                <span>{authProvider === 'email' ? 'Email account' : `Signed in via ${authProvider}`}</span>
+              </div>
+              <button className="icon-btn" onClick={signOut} aria-label="Sign out" title="Sign out">
+                <LogOut size={16} />
+              </button>
             </div>
-            <div className="profile-info">
-              <strong>{displayName}</strong>
-              <span>{authProvider === 'email' ? 'Email account' : `Signed in via ${authProvider}`}</span>
-            </div>
-            <button className="icon-btn" onClick={signOut} aria-label="Sign out" title="Sign out">
-              <LogOut size={16} />
-            </button>
-          </div>
+          )}
         </div>
       </aside>
 
@@ -505,12 +528,27 @@ function App() {
             </button>
           )}
           <div className="topbar-right">
-            <span className="secure-pill">
-              <ShieldCheck size={14} /> Private session
-            </span>
-            <button className="topbar-new-btn" onClick={newConversation}>
-              <Plus size={15} /> New chat
-            </button>
+            {isGuest ? (
+              <>
+                {inChat && (
+                  <button className="topbar-new-btn" onClick={newConversation}>
+                    <Plus size={15} /> New chat
+                  </button>
+                )}
+                <button className="topbar-signin-btn" onClick={() => setAuthOpen(true)}>
+                  Sign in
+                </button>
+              </>
+            ) : (
+              <>
+                <span className="secure-pill">
+                  <ShieldCheck size={14} /> Private session
+                </span>
+                <button className="topbar-new-btn" onClick={newConversation}>
+                  <Plus size={15} /> New chat
+                </button>
+              </>
+            )}
           </div>
         </header>
 
@@ -611,6 +649,14 @@ function App() {
             </section>
 
             <footer className="chat-footer">
+              {isGuest && (
+                <div className="guest-nudge-bar">
+                  <span>Guest mode · This chat won't be saved after refresh.</span>
+                  <button type="button" onClick={() => setAuthOpen(true)}>
+                    Sign in to save
+                  </button>
+                </div>
+              )}
               <StatusBanners
                 error={error}
                 notice={notice}
@@ -700,6 +746,7 @@ function GlassPillForm({
         onChange={(e) => onChange(e.target.value)}
         placeholder={placeholder}
         aria-label="Ask a legal question"
+        disabled={busy}
       />
 
       <div className="pill-actions">
@@ -723,73 +770,6 @@ function GlassPillForm({
         </button>
       </div>
     </form>
-  )
-}
-
-function HeroLanding({ onAsk, onUpload, onSignIn, listening, startVoiceInput }) {
-  const [query, setQuery] = useState('')
-  return (
-    <main className="cobalt-shell landing-shell">
-      <button className="landing-signin-btn" onClick={onSignIn}>Sign in</button>
-      <div className="hero-stage">
-        <div className="hero-content">
-          <JurixLogo />
-          <h1 className="hero-headline">
-            ELITE INDIAN<br />LEGAL<br />INTELLIGENCE
-          </h1>
-          <p className="hero-tagline">
-            Instant, statute-grounded clarity for Indian law — analyze legal notices, FIRs, contracts, and everyday rights in seconds.
-          </p>
-          <div className="hero-tags">
-            {HERO_TAGS.map((tag) => (
-              <span key={tag} className="hero-tag">{tag}</span>
-            ))}
-          </div>
-        </div>
-
-        <img
-          className="justice-statue"
-          src="/lady-justice.png"
-          alt="Blue-lit Lady Justice holding balanced scales"
-        />
-
-        <div className="hero-bottom">
-          <div className="hero-composer-wrap">
-            <GlassPillForm
-              value={query}
-              onChange={setQuery}
-              onSubmit={() => onAsk(query.trim() || 'I have a legal question')}
-              onAttach={onUpload}
-              onVoice={() => startVoiceInput((t) => setQuery((c) => `${c}${c ? ' ' : ''}${t}`))}
-              listening={listening}
-              busy={false}
-              uploading={false}
-              placeholder="Ask a legal question..."
-            />
-            <div className="prompt-chips">
-              {QUICK_PROMPTS.map((item) => (
-                <button
-                  key={item.label}
-                  type="button"
-                  className="prompt-chip"
-                  onClick={() => onAsk(item.prompt)}
-                >
-                  <Sparkles size={12} />
-                  <span>{item.label}</span>
-                </button>
-              ))}
-            </div>
-          </div>
-          <div className="hero-micro-footer">
-            <span>Grounded in Indian Statutes</span>
-            <span>·</span>
-            <span>OCR Document Analysis</span>
-            <span>·</span>
-            <span>Private & Encrypted Sessions</span>
-          </div>
-        </div>
-      </div>
-    </main>
   )
 }
 

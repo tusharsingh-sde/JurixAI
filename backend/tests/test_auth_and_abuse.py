@@ -129,6 +129,122 @@ class TestAuthAndAbuse(unittest.TestCase):
         finally:
             app.dependency_overrides.pop(backend.get_current_user, None)
 
+    def test_guest_chat_works_without_db_writes(self):
+        """POST /chat without token returns 200, session_id is None, guest is True, and 0 DB queries."""
+        with patch("backend.supabase.table") as mock_table, \
+             patch("backend.invoke_gemini", return_value="Here is legal guidance."):
+            app.state.db = MagicMock()
+            app.state.db.similarity_search.return_value = []
+
+            resp = self.client.post("/chat", json={
+                "message": "What is the penalty for simple theft under BNS?"
+            })
+            self.assertEqual(resp.status_code, 200)
+            data = resp.json()
+            self.assertIsNone(data["session_id"])
+            self.assertTrue(data["guest"])
+            self.assertEqual(data["reply"], "Here is legal guidance.")
+            mock_table.assert_not_called()
+
+    def test_guest_followup_and_doc_context_injected_safely(self):
+        """Guest history and document text are injected into prompt and HTML/XML tags are escaped."""
+        captured_prompts = []
+        def fake_invoke(prompt, *args, **kwargs):
+            captured_prompts.append(prompt)
+            return "Analysis response"
+
+        with patch("backend.supabase.table") as mock_table, \
+             patch("backend.invoke_gemini", side_effect=fake_invoke):
+            app.state.db = MagicMock()
+            app.state.db.similarity_search.return_value = []
+
+            resp = self.client.post("/chat", json={
+                "message": "Can they arrest me <script>alert(1)</script>?",
+                "document_text": "FIR Details: Section 302 <breakout>",
+                "document_name": "FIR <1>.pdf",
+                "guest_history": [
+                    {"role": "User", "content": "I got a notice <tag>"},
+                    {"role": "JurixAI", "content": "Notice under section 41A <tag>"}
+                ]
+            })
+            self.assertEqual(resp.status_code, 200)
+            mock_table.assert_not_called()
+
+            prompt = captured_prompts[0]
+            # Verify history was injected
+            self.assertIn("User: I got a notice &lt;tag&gt;", prompt)
+            self.assertIn("JurixAI: Notice under section 41A &lt;tag&gt;", prompt)
+            # Verify document was injected
+            self.assertIn("USER UPLOADED DOCUMENT (FIR &lt;1&gt;.pdf):", prompt)
+            self.assertIn("FIR Details: Section 302 &lt;breakout&gt;", prompt)
+            # Verify user message was escaped
+            self.assertIn("Can they arrest me &lt;script&gt;alert(1)&lt;/script&gt;?", prompt)
+
+    def test_invalid_or_stale_token_strictly_returns_401(self):
+        """Invalid or stale token must return 401 on /chat and /upload, never falling back to guest."""
+        # /chat with bad token
+        resp_chat = self.client.post(
+            "/chat",
+            headers={"Authorization": "Bearer bad-expired-token"},
+            json={"message": "Help me"}
+        )
+        self.assertEqual(resp_chat.status_code, 401)
+        self.assertIn("Invalid or expired token", resp_chat.json()["detail"])
+
+        # /upload with bad token
+        resp_upload = self.client.post(
+            "/upload",
+            headers={"Authorization": "Bearer bad-expired-token"},
+            files={"file": ("test.pdf", b"%PDF-1.4 sample", "application/pdf")}
+        )
+        self.assertEqual(resp_upload.status_code, 401)
+        self.assertIn("Invalid or expired token", resp_upload.json()["detail"])
+
+    def test_tighter_guest_rate_limits(self):
+        """Unauthenticated guests have 5 req/min cap on /upload and 12 req/min cap on /chat."""
+        # /upload guest cap: 5 allowed, 6th rejected with 429
+        with patch("backend.extract_document_text_sync", return_value=("Doc text", False)):
+            for i in range(5):
+                resp = self.client.post(
+                    "/upload",
+                    files={"file": ("test.pdf", b"%PDF-1.4 sample", "application/pdf")}
+                )
+                self.assertEqual(resp.status_code, 200, f"Guest upload {i+1} failed: {resp.text}")
+
+            resp_upload_6 = self.client.post(
+                "/upload",
+                files={"file": ("test.pdf", b"%PDF-1.4 sample", "application/pdf")}
+            )
+            self.assertEqual(resp_upload_6.status_code, 429)
+            self.assertIn("Rate limit exceeded (5 requests per 60s)", resp_upload_6.json()["detail"])
+
+        # Reset rate limiter for chat test
+        limiter.reset()
+        backend._user_rate_buckets.clear()
+
+        # /chat guest cap: 12 allowed, 13th rejected with 429
+        with patch("backend.invoke_gemini", return_value="Reply"):
+            app.state.db = MagicMock()
+            app.state.db.similarity_search.return_value = []
+            for i in range(12):
+                resp = self.client.post(
+                    "/chat",
+                    json={"message": f"Question {i+1}"}
+                )
+                self.assertEqual(resp.status_code, 200, f"Guest chat {i+1} failed: {resp.text}")
+
+            resp_chat_13 = self.client.post(
+                "/chat",
+                json={"message": "Question 13"}
+            )
+            self.assertEqual(resp_chat_13.status_code, 429)
+            self.assertIn("Rate limit exceeded (12 requests per 60s)", resp_chat_13.json()["detail"])
+
+    def test_sessions_strictly_protected_for_guests(self):
+        """GET /sessions without token returns 401/403, guest cannot view sessions."""
+        resp = self.client.get("/sessions")
+        self.assertIn(resp.status_code, (401, 403))
+
 if __name__ == "__main__":
     unittest.main()
 
