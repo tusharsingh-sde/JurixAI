@@ -11,12 +11,12 @@
 [![LangChain](https://img.shields.io/badge/LangChain-Chroma-1C3C3C?style=for-the-badge&logo=langchain&logoColor=white)](https://langchain.com)
 [![Google Gemini](https://img.shields.io/badge/Google_Gemini-2.5_Flash-4285F4?style=for-the-badge&logo=google&logoColor=white)](https://ai.google.dev)
 [![Supabase](https://img.shields.io/badge/Supabase-Auth_%26_DB-3ECF8E?style=for-the-badge&logo=supabase&logoColor=white)](https://supabase.com)
-[![Pytest](https://img.shields.io/badge/Pytest-27_Passed-0A9EDC?style=for-the-badge&logo=pytest&logoColor=white)](https://docs.pytest.org)
+[![Pytest](https://img.shields.io/badge/Pytest-37_Passed-0A9EDC?style=for-the-badge&logo=pytest&logoColor=white)](https://docs.pytest.org)
 [![License](https://img.shields.io/badge/License-MIT-yellow?style=for-the-badge)](LICENSE)
 
-**JurixAI** is a production-hardened, **RAG-based** (Retrieval-Augmented Generation) legal intelligence assistant purpose-built for the **Indian Legal System**. It goes beyond cold legal summaries — acting as a trusted *Legal Saathi* that understands distress and delivers authoritative, law-backed guidance with empathy and clarity.
+**JurixAI** is a production-hardened, **RAG-based** (Retrieval-Augmented Generation) legal intelligence assistant purpose-built for the **Indian Legal System**. It goes beyond cold legal summaries — acting as a trusted *Legal Saathi* that understands distress, navigates new and legacy criminal codes (BNS/IPC, BNSS/CrPC, BSA), and delivers authoritative, statute-backed guidance with empathy, procedural clarity, and robust quota protection.
 
-[Getting Started](#-getting-started) · [Architecture](#-architecture) · [API Reference](#-api-reference) · [Docker Deployment](#-docker-deployment) · [Contributing](#-contributing)
+[Getting Started](#-getting-started) · [Architecture](#-architecture) · [Knowledge Base](#-legal-knowledge-base) · [API Reference](#-api-reference) · [Docker Deployment](#-docker-deployment) · [Testing](#-testing--verification)
 
 </div>
 
@@ -24,16 +24,18 @@
 
 ## 🎯 The Problem
 
-Indian law is vast, nuanced, and deeply intimidating for citizens and small businesses. From understanding complex FIR procedures to navigating tenant eviction rights, most people feel overwhelmed by legal jargon and uncertain about procedural remedies.
+Indian law is vast, nuanced, and deeply intimidating for citizens and small businesses. From understanding FIR procedures under the newly enacted criminal codes to navigating cheque bounce notices, tenant eviction rights, or cyber fraud, most people feel overwhelmed by legal jargon and uncertain about procedural remedies.
 
 **JurixAI bridges this gap by:**
 
-- 📖 **Demystifying complex legal sections** — IPC, BNS, CrPC, POSH Act, RTI Act, Cyber Laws (IT Act 2000), Domestic Violence Act, Consumer Protection, and Model Tenancy laws.
-- 🚀 **Providing actionable next steps** — Clear, structured procedural guidance tailored to your specific situation.
-- 🤝 **Maintaining an empathetic, human-centric tone** — Detects emotional distress and balances supportive reassurance with disciplined legal analysis.
-- 🌐 **Trilingual intelligence** — Seamlessly understands and responds in **English**, **Hindi** (Devanagari), and **Hinglish**.
-- 📄 **Multi-page document analysis** — Upload FIRs, legal notices, summons, or agreements with automatic OCR fallback for scanned non-text PDFs and images.
-- 🛡️ **Enterprise-grade production hardening** — Dual Supabase auth scoping, SlowAPI abuse protection, non-root Docker builds, and threadpool offloading.
+- 📖 **Demystifying both Modern & Legacy Indian Statutes** — Full coverage of **Bharatiya Nyaya Sanhita (BNS 2023)**, **Bharatiya Nagarik Suraksha Sanhita (BNSS 2023)**, **Bharatiya Sakshya Adhiniyam (BSA 2023)**, alongside legacy **IPC 1860**, **CrPC 1973**, **Constitution of India**, **NI Act 1881**, **POSH Act**, **RTI Act**, **Cyber Law (IT Act)**, **Domestic Violence Act**, **Consumer Protection**, and **Tenancy Laws**.
+- 🚀 **Providing actionable next steps** — Clear, structured procedural guidance, emergency helplines (112, 1930, 181, 15100), and draft notices tailored to your specific situation.
+- 🤝 **Maintaining an empathetic, human-centric tone** — A "Calm Anchor" persona that detects distress, de-escalates panic, and delivers structured advice (Fastest Exit $\rightarrow$ Statutory Grounding $\rightarrow$ Smart Alternatives).
+- 🌐 **Trilingual intelligence** — Seamlessly understands and responds in **English**, **Hindi** (Devanagari), and **Hinglish** without script mixing.
+- 📄 **Multi-page document analysis** — Upload FIRs, legal notices, summons, or agreements with automatic OCR fallback via `pytesseract` for scanned documents and images.
+- ⚡ **Input-Token & Cost Optimization** — Smart small-talk RAG bypass, strict context budgets (`MAX_RAG_CONTEXT_CHARS=3500`, `MAX_DOC_CONTEXT_CHARS=6000`), bounded history windows (`MAX_HISTORY_MESSAGES=4`, `MAX_HISTORY_MSG_CHARS=700`), and `GEMINI_MAX_OUTPUT_TOKENS=1024`.
+- 🛡️ **Enterprise-grade production guardrails** — Global daily kill-switch (`MAX_GLOBAL_DAILY_REQUESTS=250`), strict unauthenticated guest rate-limits (5 req/10min, 15 req/day), message length caps (1500 chars for guests), and dual-scoped Supabase auth.
+- 🎨 **Flagship Gemini-Inspired Dark Theme** — Deep midnight canvas (`#090D16`), subtle ambient cobalt glow, Lady Justice artwork, borderless AI replies, and responsive frosted docks.
 
 ---
 
@@ -42,7 +44,7 @@ Indian law is vast, nuanced, and deeply intimidating for citizens and small busi
 ```
 ┌────────────────────────────────────────────────────────────────────────┐
 │                        FRONTEND (React 19 + Vite)                      │
-│                  Port 5173 · Cobalt Law Glass Interface                │
+│            Flagship Gemini Dark Theme · Responsive Frosted Dock        │
 └───────────────────────────────────┬────────────────────────────────────┘
                                     │  HTTP / REST API (CORS + PNA Allowed)
                                     ▼
@@ -50,29 +52,31 @@ Indian law is vast, nuanced, and deeply intimidating for citizens and small busi
 │                    BACKEND (FastAPI Hardened Service)                  │
 │                     Port 8000 · Single Worker Non-Root                 │
 │                                                                        │
-│  ┌───────────────────────┐  ┌──────────────────┐  ┌─────────────────┐ │
-│  │   Auth & Abuse Guard  │  │   Upload Safety  │  │  Health Probes  │ │
-│  │ SlowAPI Rate Limiting │  │ Chunked 413 Abort│  │ /health (Live)  │ │
-│  │ Dual Supabase Clients │  │ Magic Byte Check │  │ /ready (Chroma) │ │
-│  └───────────┬───────────┘  └────────┬─────────┘  └─────────────────┘ │
-│              │                       │                                 │
-│              ▼                       ▼                                 │
+│  ┌────────────────────────┐  ┌──────────────────┐  ┌─────────────────┐ │
+│  │   Auth & Abuse Guard   │  │   Upload Safety  │  │  Health Probes  │ │
+│  │ SlowAPI Rate Limiting  │  │ Chunked 413 Abort│  │ /health (Live)  │ │
+│  │ Global Daily Limit=250 │  │ Magic Byte Check │  │ /ready (Chroma) │ │
+│  │ Dual Supabase Scopes   │  │ OCR Image Defense│  │                 │ │
+│  └───────────┬────────────┘  └────────┬─────────┘  └─────────────────┘ │
+│              │                        │                                │
+│              ▼                        ▼                                │
 │  ┌──────────────────────────────────────────────────────────────────┐ │
 │  │                     Async Lifespan Engine                        │ │
-│  │  ┌─────────────────────────┐    ┌─────────────────────────────┐  │ │
-│  │  │ ChromaDB Vector Store   │    │ SentenceTransformer Embeds  │  │ │
-│  │  │ (2,158 Embedded Chunks) │    │ (all-MiniLM-L6-v2 Cached)   │  │ │
-│  │  └─────────────────────────┘    └─────────────────────────────┘  │ │
-│  │  ┌─────────────────────────┐    ┌─────────────────────────────┐  │ │
-│  │  │ Tesseract OCR (Eng+Hin) │    │ Per-Session Concurrency Lock│  │ │
-│  │  └─────────────────────────┘    └─────────────────────────────┘  │ │
+│  │  ┌──────────────────────────┐    ┌─────────────────────────────┐ │ │
+│  │  │ Canonical ChromaDB Store │    │ SentenceTransformer Embeds  │ │ │
+│  │  │ (6,994 Embedded Chunks)  │    │ (all-MiniLM-L6-v2 Offline)  │ │ │
+│  │  └──────────────────────────┘    └─────────────────────────────┘ │ │
+│  │  ┌──────────────────────────┐    ┌─────────────────────────────┐ │ │
+│  │  │ Tesseract OCR (Eng+Hin)  │    │ Token & Context Optimizer   │ │ │
+│  │  │ Auto-Fallback Engine     │    │ Small-Talk Bypass & Budgets │ │ │
+│  │  └──────────────────────────┘    └─────────────────────────────┘ │ │
 │  └───────────────────────────────────┬──────────────────────────────┘ │
 │                                      │                                 │
 │                                      ▼                                 │
 │                       ┌──────────────────────────────┐                │
 │                       │    Google Gemini API SDK     │                │
-│                       │  (gemini-2.5-flash with      │                │
-│                       │   automatic multi-fallback)  │                │
+│                       │  (gemini-2.5-flash cascade   │                │
+│                       │   with multi-model fallback) │                │
 │                       └──────────────────────────────┘                │
 └────────────────────────────────────────────────────────────────────────┘
 ```
@@ -81,11 +85,11 @@ Indian law is vast, nuanced, and deeply intimidating for citizens and small busi
 
 | Step | Phase | Description |
 |------|-------|-------------|
-| 1 | **Data Ingestion** | 8 authoritative Indian Law PDFs split into semantic chunks (1,000 chars, 200 overlap) with `RecursiveCharacterTextSplitter`. |
-| 2 | **Local Vectorization** | Chunks embedded using `all-MiniLM-L6-v2` and stored in persistent ChromaDB (`backend/Jurixai_db`) with 2,158 pre-indexed legal vectors. |
-| 3 | **Threadpool Retrieval** | Non-blocking `similarity_search` offloaded to `run_in_threadpool` to prevent event-loop starvation. |
-| 4 | **Context Augmentation** | Sanitized query tags (`<user_message>`, `<conversation_history>`, `<retrieved_context>`, `<uploaded_document>`) injected into the persona prompt with persistent document memory across follow-ups. |
-| 5 | **Resilient Generation** | Google Gemini SDK invocation wrapped in threadpools with an automated multi-model fallback cascade (`gemini-2.5-flash`, `gemini-2.5-flash-lite`, `gemini-2.0-flash`). |
+| 1 | **Data Ingestion & Chunking** | 19 authoritative Indian statutes and bare acts audited and parsed with `RecursiveCharacterTextSplitter` calibrated to `chunk_size=750` chars and `chunk_overlap=120` chars to fit safely within `all-MiniLM-L6-v2`'s 256-token hard window. Scanned/empty PDFs are automatically purged. |
+| 2 | **Canonical Vectorization** | Chunks embedded offline using `all-MiniLM-L6-v2` and indexed into the canonical persistent ChromaDB directory (`backend/Jurixai_db`) containing **6,994 legal vectors** (42.3 MB on disk). |
+| 3 | **Smart RAG Retrieval & Small-Talk Bypass** | If the user sends greetings or acknowledgements ("hi", "namaste", "thanks", "ok", "bye" under 5 words with zero legal terms) without an uploaded document, ChromaDB retrieval is bypassed completely for a lightweight conversational prompt (<500 chars). For legal queries, similarity search fetches `k=3` chunks capped at `MAX_RAG_CONTEXT_CHARS=3500`. |
+| 4 | **Context & History Augmentation** | Input context is tightly bounded: historical turns capped to last 4 messages (`MAX_HISTORY_MESSAGES=4`), 700 chars per message (`MAX_HISTORY_MSG_CHARS=700`), and uploaded document text capped to 6,000 chars (`MAX_DOC_CONTEXT_CHARS=6000`). Prompt length is logged at `INFO` level. |
+| 5 | **Resilient Generation & Quota Protection** | Before invocation, the global daily counter (`MAX_GLOBAL_DAILY_REQUESTS=250`) is evaluated with automatic UTC date rollover. Generation runs with fallback across models (`gemini-2.5-flash`, `gemini-3.5-flash-lite`, `gemini-3.8-flash`) and output tokens capped at 1024. |
 
 ---
 
@@ -97,12 +101,12 @@ Indian law is vast, nuanced, and deeply intimidating for citizens and small busi
 | **Python** | 3.11 / 3.14 | Core execution runtime |
 | **FastAPI** | 0.115+ | High-performance asynchronous REST API |
 | **Uvicorn** | 0.34+ | ASGI web server with proxy header support |
-| **SlowAPI** | 0.1.9 | IP & token rate-limiting abuse protection |
+| **SlowAPI** | 0.1.9 | IP-based & token rate-limiting abuse protection |
 | **LangChain Chroma** | 1.1.0 | Vector database interface for ChromaDB |
 | **Sentence-Transformers** | 5.2.0 | Offline embedding generation (`all-MiniLM-L6-v2`) |
 | **Google GenAI** | 1.63.0 | Gemini multi-model generation with automatic fallback |
 | **Supabase** | 2.14.0 | Dual-client authentication and relational PostgreSQL persistence |
-| **pdfplumber / pypdfium2** | 0.11.5 / 5.5.0 | High-speed PDF text parsing and raster rendering |
+| **pypdf / pdfplumber** | Latest | High-speed PDF text parsing and extraction |
 | **PyTesseract** | 0.3.13 | Tesseract OCR engine with English + Hindi support |
 | **Pillow** | 11.1.0 | Image manipulation with DecompressionBomb security caps |
 
@@ -110,26 +114,38 @@ Indian law is vast, nuanced, and deeply intimidating for citizens and small busi
 | Technology | Version | Purpose |
 |------------|---------|---------|
 | **React** | 19.0.0 | Component-based reactive UI |
-| **Vite** | 8.3.2 | Lightning-fast build tool with HMR |
+| **Vite** | 8.3.8 | Lightning-fast build tool with HMR |
 | **Lucide React** | 0.468.0 | Minimalist iconography |
-| **CSS3** | Modern | Custom cobalt theme with Lady Justice backdrop art |
+| **CSS3** | Modern | Gemini-inspired Deep Midnight dark theme (`#090D16`) |
 
 ---
 
 ## 📚 Legal Knowledge Base
 
-JurixAI is pre-indexed with **8 foundational Indian statutory acts and guides**:
+JurixAI is pre-indexed with **19 verified Indian legislative acts, bare acts, and comparative tables** totaling **6,994 semantic chunks**:
 
-| Document | Coverage |
-|----------|----------|
-| `IPC.pdf` | Indian Penal Code — Criminal offences, definitions & punishments |
-| `cyber_law.pdf` | Information Technology Act 2000 — Cyber fraud, identity theft, electronic evidence |
-| `POSH_act.pdf` | Prevention of Sexual Harassment at Workplace Act 2013 |
-| `RTI-Act_English.pdf` | Right to Information Act 2005 — Citizen transparency & appeals |
-| `Consumer_Handbook.pdf` | Consumer Protection Act 2019 — Defective goods, services, e-commerce grievances |
-| `Model-Tenancy-Act_2021.pdf` | Tenancy rights, rent agreements, security deposits, eviction grounds |
-| `First_Information_Report.pdf` | FIR registration protocol, cognizable offences & police obligations |
-| `protection_of_women_from_domestic_violence_act,.pdf` | Protection of Women from Domestic Violence Act 2005 — Orders & shelter rights |
+| Statute / Document | Chunks | Coverage & Core Provisions |
+|:---|:---:|:---|
+| `constitution-of-india.pdf` | **1,859** | Fundamental Rights (Arts. 14, 19, 21, 22), Writs (Art. 32/226), Directive Principles |
+| `Bharatiya_Nagarik_Suraksha_Sanhita,_2023.pdf` | **1,495** | BNSS 2023 — Arrest procedure, FIR registration (Sec. 173), bail safeguards, trials |
+| `IPC.pdf` | **858** | Indian Penal Code 1860 — Criminal offences, definitions, penalties |
+| `BNS2023.pdf` | **811** | Bharatiya Nyaya Sanhita 2023 — Modern criminal law replacing IPC |
+| `BSA2023.pdf` | **343** | Bharatiya Sakshya Adhiniyam 2023 — Digital evidence, admissibility, witness rules |
+| `Motor Vehicles (Amendment) Act, 2019.pdf` | **234** | Traffic penalties, challans, compensation, licensing regulations |
+| `Consumer_Handbook.pdf` | **204** | Consumer Protection Act 2019 — Defective goods, unfair trade practices, e-commerce |
+| `negotiable-instrument-act.pdf` | **185** | NI Act 1881 — Section 138 cheque bounce notices, 15-day timelines, jurisdiction |
+| `payment of wages.pdf` | **158** | Payment of Wages Act 1936 — Unlawful salary deductions, delay remedies |
+| `COMPARATIVE-TABLE-OF-IPC-1860-BNS-2023...pdf` | **129** | Direct mapping table: IPC Section $\leftrightarrow$ Equivalent BNS Section |
+| `RTI-Act_English.pdf` | **124** | Right to Information Act 2005 — 30-day filing timeline, PIO duties, appeals |
+| `258.pdf` *(Special Marriage Act, 1954)* | **118** | Civil marriage registration, 30-day notice, divorce procedure |
+| `29 - The Hindu Marriage Act, 1955.pdf` | **117** | Restitution of conjugal rights, mutual divorce, maintenance under Hindu law |
+| `COMPARATIVE-TABLE-OF-CRPC-1973-BNSS-2023...pdf` | **111** | Direct mapping table: CrPC Section $\leftrightarrow$ Equivalent BNSS Section |
+| `Model-Tenancy-Act_2021.pdf` | **108** | Tenancy rights, rent agreements, 2-month security deposit caps, eviction bounds |
+| `POSH_act.pdf` | **69** | Prevention of Sexual Harassment at Workplace Act 2013 — Internal Complaints Committee |
+| `protection_of_women_from_domestic_violence_act,.pdf` | **64** | Domestic Violence Act 2005 — Protection orders, residence orders, Sec. 12 petitions |
+| `cyber_law.pdf` | **6** | IT Act 2000 — Identity theft (Sec. 66C), cheating by personation (Sec. 66D) |
+| `Section_105_in_The_Transfer_Of_Property_Act_1882.PDF` | **1** | Leases of immovable property, rights and liabilities of lessor/lessee |
+| **Total Chunks** | **6,994** | **42.32 MB Persistent Vector Store** |
 
 ---
 
@@ -138,35 +154,36 @@ JurixAI is pre-indexed with **8 foundational Indian statutory acts and guides**:
 ```
 JurixAI_core/
 ├── backend/
-│   ├── backend.py            # Hardened FastAPI application & lifecycle
-│   ├── build_database.py     # Legal PDF ingestion script for ChromaDB
+│   ├── backend.py            # Hardened FastAPI service, guardrails & endpoints
+│   ├── build_database.py     # Legal PDF audit & ChromaDB indexing pipeline
 │   ├── query_db.py           # CLI vector database query tool
-│   ├── requirements.txt      # Pinned production dependencies
-│   ├── requirements-dev.txt  # Pinned development & ingestion tools
+│   ├── requirements.txt      # Pinned production runtime dependencies
 │   ├── Dockerfile            # Multi-stage, non-root hardened container
-│   ├── .dockerignore         # Docker context exclusions
-│   ├── .env.example          # Template for backend environment variables
-│   ├── legal_data/           # 8 core Indian Law PDFs
-│   ├── Jurixai_db/           # ChromaDB database (tracked in Git, 2,158 vectors)
-│   └── tests/                # Automated pytest unit test suite (15 tests)
-│       ├── test_auth_and_abuse.py
-│       ├── test_data_layer.py
-│       └── test_upload_safety.py
+│   ├── .dockerignore         # Container build context exclusions
+│   ├── .env.example          # Environment variable template with documentation
+│   ├── legal_data/           # 19 audited Indian Law PDFs (text-verified)
+│   ├── Jurixai_db/           # Canonical ChromaDB vector store (6,994 vectors)
+│   └── tests/                # Automated pytest suite (37 tests)
+│       ├── test_auth_and_abuse.py   # Rate limits, daily caps, small talk, tokens
+│       ├── test_data_layer.py       # Supabase persistence, session locks, history
+│       └── test_upload_safety.py    # Magic bytes, decompression bombs, OCR caps
 │
 ├── frontend/
-│   ├── index.html            # Single page app entry
+│   ├── index.html            # SPA entry with dark canvas metadata
 │   ├── vite.config.js        # Vite dev server configuration
 │   ├── package.json          # Node dependencies
 │   ├── public/               # Static assets (lady-justice.png)
 │   └── src/
 │       ├── main.jsx          # React DOM mounting
-│       ├── App.jsx           # Full chat UI & session management
-│       └── styles.css        # Custom cobalt theme styling
+│       ├── App.jsx           # Full chat UI, guest history & document handling
+│       └── styles.css        # Flagship Gemini Dark Theme styling
 │
 ├── migrations/
 │   └── 001_jurix.sql         # Idempotent Supabase PostgreSQL schema & RLS policies
 │
+├── .dockerignore             # Root docker build exclusions
 ├── .gitignore                # Comprehensive exclusions (secrets, venv, caches)
+├── docker-compose.yml        # Docker compose orchestrator for backend
 └── README.md
 ```
 
@@ -176,8 +193,7 @@ JurixAI_core/
 
 ### 1. Prerequisites
 - **Python** 3.10+ (Python 3.11 recommended for Docker parity)
-- **Node.js** 18+ and **npm**
-- **Docker** (optional, for containerized run)
+- **Node.js** 18+ and **pnpm** (or npm)
 - **Google Gemini API Key** ([Google AI Studio](https://aistudio.google.com/))
 - **Supabase Account** ([Supabase](https://supabase.com/))
 
@@ -211,6 +227,19 @@ SUPABASE_URL=https://your-project.supabase.co
 SUPABASE_SECRET_KEY=your_supabase_service_role_key
 SUPABASE_ANON_KEY=your_supabase_anon_public_key
 ALLOWED_ORIGINS=http://localhost:5173,http://localhost:3000
+
+# Optional Quota & Token Budgets (defaults shown)
+MAX_GLOBAL_DAILY_REQUESTS=250
+GUEST_CHAT_PER_10MIN=5
+GUEST_CHAT_PER_DAY=15
+GUEST_UPLOAD_PER_HOUR=3
+MAX_GUEST_MESSAGE_CHARS=1500
+GEMINI_MAX_OUTPUT_TOKENS=1024
+RAG_TOP_K=3
+MAX_RAG_CONTEXT_CHARS=3500
+MAX_HISTORY_MESSAGES=4
+MAX_HISTORY_MSG_CHARS=700
+MAX_DOC_CONTEXT_CHARS=6000
 ```
 
 Start the server:
@@ -230,8 +259,8 @@ In a new terminal:
 
 ```bash
 cd frontend
-npm install
-npm run dev
+pnpm install
+pnpm dev
 ```
 
 Open `http://localhost:5173` in your browser.
@@ -243,10 +272,11 @@ Open `http://localhost:5173` in your browser.
 The backend is packaged as an optimized, non-root, production container with pre-warmed models and health checks:
 
 ```bash
-# Build the container
-docker build -t jurixai-backend ./backend
+# Using docker-compose
+docker compose up -d
 
-# Run with environment variables
+# Or manual build:
+docker build -t jurixai-backend ./backend
 docker run -p 8000:8000 --env-file backend/.env jurixai-backend
 ```
 
@@ -256,67 +286,81 @@ docker run -p 8000:8000 --env-file backend/.env jurixai-backend
 
 ### Health & Liveness
 - **`GET /health`**: Fast dependency-free liveness probe for load balancers. Returns `{"status": "ok"}`.
-- **`GET /ready`**: Readiness check verifying ChromaDB collection count. Returns `{"status": "ready", "documents_loaded": 2158}`.
+- **`GET /ready`**: Readiness check verifying ChromaDB collection state. Returns `{"status": "ready", "documents_loaded": 6994}`.
 
 ### Authentication (SlowAPI Rate Limited)
-- **`POST /signup`**: Creates an auto-confirmed user account via Supabase Admin (Limit: `5/hour/IP`, min password 8 chars).
+- **`POST /signup`**: Creates an unconfirmed user account requiring email verification (Limit: `5/hour/IP`, min password 8 chars, anti-spoofing).
 - **`POST /login`**: Verifies user credentials via Supabase Anon client and issues JWT token (Limit: `10/minute/IP`).
 - **`POST /logout`**: Invalidates user token with `scope="local"`.
 
 ### Sessions & Conversations
-- **`GET /sessions`**: List conversations for authenticated user.
-- **`GET /sessions/{id}/messages`**: Retrieve message history for a session (paginated to 100 messages).
+- **`GET /sessions`**: List conversations for authenticated user (strictly forbidden for unauthenticated guests).
+- **`GET /sessions/{id}/messages`**: Retrieve message history for a session (paginated to 100 messages ordered by sequence).
 - **`DELETE /sessions/{id}`**: Delete a session and its associated message history.
 
 ### Core RAG Chat
-- **`POST /chat`** (Limit: `30/minute/user` for authed users, `12/minute/IP` for unauthenticated guests):
-  ```json
-  {
-    "message": "What is the penalty for cyber fraud?",
-    "session_id": "optional-uuid-here",
-    "document_text": "optional extracted legal document text",
-    "document_name": "optional-filename.pdf",
-    "guest_history": [
-      {"role": "User", "content": "Previous question"},
-      {"role": "JurixAI", "content": "Previous answer"}
-    ]
-  }
-  ```
-  Returns law-grounded response with empathetic guidance, legal sections, and action steps. Automatically persists document text and conversation history for authenticated users. For guest users, operates entirely in-memory with zero database writes.
+- **`POST /chat`**:
+  - **Global Daily Cap**: Enforces `MAX_GLOBAL_DAILY_REQUESTS` (default: 250). Returns HTTP `429` when reached. Auto-resets at 00:00 UTC.
+  - **Rate Limits**:
+    - Authenticated: `30/minute/user`.
+    - Guest Mode: `5/10min/IP` and `15/day/IP`.
+  - **Message Length**: Up to 4,000 chars for authenticated users; capped at 1,500 chars for guests.
+  - **Small-Talk Optimization**: Short greetings/acknowledgements under 5 words without legal keywords skip ChromaDB retrieval completely.
+  - **Payload**:
+    ```json
+    {
+      "message": "What is the timeline for Section 138 notice?",
+      "session_id": "optional-uuid-here",
+      "document_text": "optional extracted legal document text (capped at 6000 chars)",
+      "document_name": "optional-filename.pdf",
+      "guest_history": [
+        {"role": "User", "content": "Previous question"},
+        {"role": "JurixAI", "content": "Previous answer"}
+      ]
+    }
+    ```
+  - Returns law-grounded response with empathetic guidance, legal sections, emergency contacts, and action steps.
 
 ### Document Upload & OCR
-- **`POST /upload`** (Limit: `10/minute/user` for authed users, `5/minute/IP` for unauthenticated guests):
+- **`POST /upload`** (Limit: `10/minute/user` for authed users, `3/hour/IP` for unauthenticated guests):
   - Enforces `MAX_UPLOAD_MB` (default 8MB) with early chunked 413 abort.
   - Verifies magic byte headers (`%PDF`, PNG, JPEG).
   - Decompression bomb protection (25M pixel limit).
   - 30-page parsing cap.
-  - Automatic OCR fallback via `pytesseract` for scanned non-text PDFs.
+  - Automatic OCR fallback via `pytesseract` for scanned non-text PDFs and images.
   - Returns `{"status": "success", "filename": "...", "extracted_text": "...", "truncated": false}`.
 
 ---
 
 ## 🧪 Testing & Verification
 
-The backend includes a comprehensive pytest suite with 27 unit tests covering guest mode, auth, upload security, rate limiting, and database operations with mocked services:
+The test suite contains **37 comprehensive unit tests** covering all auth, rate-limit, abuse prevention, RAG optimization, and data layer behaviors:
 
 ```bash
-cd backend
-python -m pytest tests/ -v
+backend\.venv\Scripts\pytest backend/tests
 ```
 
 ```text
-tests/test_auth_and_abuse.py::test_signup_rate_limit PASSED
-tests/test_auth_and_abuse.py::test_short_password_rejected PASSED
-tests/test_auth_and_abuse.py::test_guest_chat_works_without_db_writes PASSED
-tests/test_auth_and_abuse.py::test_guest_followup_and_doc_context_injected_safely PASSED
-tests/test_auth_and_abuse.py::test_invalid_or_stale_token_strictly_returns_401 PASSED
-tests/test_auth_and_abuse.py::test_tighter_guest_rate_limits PASSED
-tests/test_auth_and_abuse.py::test_sessions_strictly_protected_for_guests PASSED
-tests/test_data_layer.py::test_document_persistence_across_followups PASSED
-tests/test_upload_safety.py::test_magic_byte_validation PASSED
-...
-====================== 27 passed in 4.97s ======================
+============================= test session starts =============================
+platform win32 -- Python 3.14.0, pytest-9.2.0, pluggy-1.7.0
+rootdir: C:\Users\tstus\Desktop\Projects\JurixAI_core
+plugins: anyio-4.13.0, langsmith-0.7.30
+collected 37 items
+
+backend\tests\test_auth_and_abuse.py ......................              [ 59%]
+backend\tests\test_data_layer.py .........                               [ 83%]
+backend\tests\test_upload_safety.py ......                               [100%]
+
+======================= 37 passed, 7 warnings in 11.48s =======================
 ```
+
+### Key Verified Invariants:
+1. **Global Daily Kill-Switch**: Exact 429 response when daily budget is reached; automatic UTC date rollover.
+2. **Small-Talk RAG Bypass**: Greetings and acknowledgements bypass ChromaDB retrieval; minimal prompt (<500 chars).
+3. **Budget Capping**: History capped to 4 turns (700 chars/turn); document text capped to 6,000 chars; RAG context capped to 3,500 chars.
+4. **Guest Shield**: Rate-limited to 5/10min and 15/day; message length capped to 1500 chars; zero database writes.
+5. **Anti-Spoofing & Pre-Hijacking**: Standard unconfirmed signups prevent account hijacking; spoofed `X-Forwarded-For` headers cannot bypass IP rate limits.
+6. **Upload Safety**: Magic bytes verified, chunked early abort, OCR page caps, and image decompression protection.
 
 ---
 
