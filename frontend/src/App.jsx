@@ -517,7 +517,7 @@ function App() {
       </aside>
 
       <main className={`workspace ${inChat ? 'workspace-chat' : 'workspace-hero'}`}>
-        <header className="topbar">
+        <header className={`topbar ${inChat ? 'topbar-chat' : 'topbar-landing'}`}>
           <button className="icon-btn topbar-menu" onClick={() => setSidebarOpen(true)} aria-label="Open menu">
             <Menu size={20} />
           </button>
@@ -945,7 +945,7 @@ function Message({ message }) {
       <div className="message-body">
         <div className="message-meta">
           <strong>JurixAI</strong>
-          <span> · Legal AI Saathi</span>
+          <span> · Legal AI Support</span>
         </div>
         <div className="message-bubble assistant-bubble">
           <FormattedText text={message.content} />
@@ -1021,7 +1021,7 @@ function renderInline(text) {
 /* Sharp Canva-matched Logo: Crisp geometric Scales + mini Gavel + Plus Jakarta Sans wordmark */
 function JurixLogo() {
   return (
-    <div className="jurix-brand" aria-label="JurixAI — Legal AI support">
+    <div className="jurix-brand" aria-label="JurixAI — Legal AI Support">
       <svg className="jurix-scales" viewBox="0 0 132 132" fill="none" xmlns="http://www.w3.org/2000/svg">
         {/* Suspension strings */}
         <path
@@ -1057,7 +1057,7 @@ function JurixLogo() {
           </svg>
           <span className="jurix-wordmark">JurixAI</span>
         </div>
-        <span className="jurix-subtitle">Legal AI support</span>
+        <span className="jurix-subtitle">Legal AI Support</span>
       </div>
     </div>
   )
